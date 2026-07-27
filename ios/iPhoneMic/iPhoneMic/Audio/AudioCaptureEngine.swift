@@ -194,7 +194,7 @@ final class AudioCaptureEngine: ObservableObject {
             [weak self] (buffer, time) in
             
             // Convert Float32 → 16-bit PCM (Respects user's channel mode setting)
-            let pcmData = PCMConverter.convertToInt16(buffer: buffer, channelCount: config.channelMode.rawValue)
+            let pcmData = PCMConverter.convertToInt16(buffer: buffer, channelCount: channelCount)
             
             // Calculate levels
             let levels = PCMConverter.calculateLevels(buffer: buffer)
