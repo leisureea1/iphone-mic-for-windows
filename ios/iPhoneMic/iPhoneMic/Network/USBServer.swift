@@ -25,7 +25,7 @@ final class USBServer: ObservableObject {
     // MARK: - Network Objects
     
     private var listener: NWListener?
-    private var activeConnection: NWConnection?
+    private var activeConnections: [NWConnection] = []
     private var heartbeatTimer: DispatchSourceTimer?
     
     // Queue for network operations
@@ -90,8 +90,8 @@ final class USBServer: ObservableObject {
     func stopListening() {
         stopHeartbeat()
         
-        activeConnection?.cancel()
-        activeConnection = nil
+        activeConnections.forEach { $0.cancel() }
+        activeConnections.removeAll()
         
         listener?.cancel()
         listener = nil
@@ -116,7 +116,7 @@ final class USBServer: ObservableObject {
     
     /// Send current audio config to the client
     func sendConfig() {
-        guard activeConnection != nil else { return }
+        guard !activeConnections.isEmpty else { return }
         
         let configPacket = config.toConfigPacket()
         if let packet = PacketBuilder.buildConfigPacket(config: configPacket) {
@@ -152,13 +152,7 @@ final class USBServer: ObservableObject {
     }
     
     private func handleNewConnection(_ connection: NWConnection) {
-        // Only allow one active connection at a time
-        if let existing = activeConnection {
-            print("[USBServer] Replacing existing connection")
-            existing.cancel()
-        }
-        
-        activeConnection = connection
+        activeConnections.append(connection)
         
         let endpoint = connection.endpoint
         let peerName: String
@@ -195,19 +189,29 @@ final class USBServer: ObservableObject {
             startHeartbeat()
             
             // Start receiving (for config ACK, etc.)
-            startReceiving()
+            if let conn = activeConnections.first(where: { "\($0.endpoint)" == peerName }) {
+                startReceiving(conn)
+            }
             
         case .failed(let error):
             print("[USBServer] Connection failed: \(error)")
-            connectionState = .waitingForConnection
-            activeConnection = nil
-            stopHeartbeat()
+            if let idx = activeConnections.firstIndex(where: { "\($0.endpoint)" == peerName }) {
+                activeConnections.remove(at: idx)
+            }
+            if activeConnections.isEmpty {
+                connectionState = .waitingForConnection
+                stopHeartbeat()
+            }
             
         case .cancelled:
             print("[USBServer] Connection cancelled")
-            connectionState = .waitingForConnection
-            activeConnection = nil
-            stopHeartbeat()
+            if let idx = activeConnections.firstIndex(where: { "\($0.endpoint)" == peerName }) {
+                activeConnections.remove(at: idx)
+            }
+            if activeConnections.isEmpty {
+                connectionState = .waitingForConnection
+                stopHeartbeat()
+            }
             
         default:
             break
@@ -241,23 +245,19 @@ final class USBServer: ObservableObject {
     }
     
     private func sendData(_ data: Data) {
-        guard let connection = activeConnection else {
+        guard !activeConnections.isEmpty else {
             isSending = false
             return
         }
         
-        connection.send(content: data, completion: .contentProcessed { [weak self] error in
+        for connection in activeConnections {
+            connection.send(content: data, completion: .contentProcessed { _ in })
+        }
+        
+        // Unblock queue immediately since we broadcasted
+        DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
-            
-            if let error = error {
-                print("[USBServer] Send error: \(error)")
-                self.isSending = false
-                return
-            }
-            
-            DispatchQueue.main.async {
-                self.bytesSent += UInt64(data.count)
-            }
+            self.bytesSent += UInt64(data.count)
             
             // Send next pending packet if any
             self.networkQueue.async {
@@ -268,16 +268,13 @@ final class USBServer: ObservableObject {
                     self.isSending = false
                 }
             }
-        })
+        }
     }
     
     // MARK: - Private: Receiving
     
-    private func startReceiving() {
-        guard let connection = activeConnection else { return }
-        
-        connection.receive(minimumIncompleteLength: Int(PacketHeader.size),
-                          maximumLength: 65536) { [weak self] data, _, isComplete, error in
+    private func startReceiving(_ connection: NWConnection) {
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] (data, context, isComplete, error) in
             
             if let data = data, !data.isEmpty {
                 // Parse incoming packets (config changes, etc.)
@@ -285,16 +282,12 @@ final class USBServer: ObservableObject {
             }
             
             if isComplete {
-                DispatchQueue.main.async {
-                    self?.connectionState = .waitingForConnection
-                    self?.activeConnection = nil
-                }
                 return
             }
             
             if error == nil {
                 // Continue receiving
-                self?.startReceiving()
+                self?.startReceiving(connection)
             }
         }
     }
@@ -323,7 +316,7 @@ final class USBServer: ObservableObject {
         timer.schedule(deadline: .now() + kHeartbeatInterval,
                       repeating: kHeartbeatInterval)
         timer.setEventHandler { [weak self] in
-            guard let self = self, self.activeConnection != nil else { return }
+            guard let self = self, !self.activeConnections.isEmpty else { return }
             let packet = PacketBuilder.buildHeartbeatPacket()
             self.enqueueAndSend(packet)
         }
