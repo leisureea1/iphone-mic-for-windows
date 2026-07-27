@@ -52,7 +52,7 @@ void data_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma_uin
 {
     (void)pInput; // Unused
     if (g_MonitorAudio && g_AudioRingBuffer) {
-        size_t bytesToRead = frameCount * 2 * sizeof(int16_t); // Stereo 16-bit
+        size_t bytesToRead = frameCount * 2 * 3; // Stereo 24-bit (3 bytes per sample)
         size_t bytesRead = g_AudioRingBuffer->read(reinterpret_cast<uint8_t*>(pOutput), bytesToRead);
         if (bytesRead < bytesToRead) {
             // Fill remainder with zeros (silence) to avoid audio glitches
@@ -60,7 +60,7 @@ void data_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma_uin
         }
     } else {
         // Output silence
-        std::memset(pOutput, 0, frameCount * 2 * sizeof(int16_t));
+        std::memset(pOutput, 0, frameCount * 2 * 3);
         // Keep clearing the buffer so old audio doesn't queue up when disabled
         if (g_AudioRingBuffer) {
             uint8_t dummy[4096];
@@ -98,8 +98,8 @@ void BackgroundUSBThread() {
                     break;
                 }
 
-                size_t pcmSamples = header.payload_size / sizeof(int16_t);
-                int16_t* pcm = reinterpret_cast<int16_t*>(payload.data());
+                size_t pcmSamples = header.payload_size / 3; // 3 bytes per 24-bit sample
+                uint8_t* pcm = payload.data();
                 
                 float maxL = 0.0f;
                 float maxR = 0.0f;
@@ -108,11 +108,17 @@ void BackgroundUSBThread() {
                 std::lock_guard<std::mutex> lock(g_WaveformMutex);
                 for (size_t i = 0; i < pcmSamples; i += 2) { // Assuming Stereo
                     if (i + 1 < pcmSamples) {
-                        float valL = pcm[i] / 32768.0f;
-                        float valR = pcm[i+1] / 32768.0f;
-                        maxL = std::max(maxL, std::abs(valL));
-                        maxR = std::max(maxR, std::abs(valR));
-                        g_Waveform.push_back(valL);
+                        int32_t valL = pcm[i*3] | (pcm[i*3+1] << 8) | (pcm[i*3+2] << 16);
+                        if (valL & 0x800000) valL |= 0xFF000000;
+                        float fL = valL / 8388608.0f;
+
+                        int32_t valR = pcm[(i+1)*3] | (pcm[(i+1)*3+1] << 8) | (pcm[(i+1)*3+2] << 16);
+                        if (valR & 0x800000) valR |= 0xFF000000;
+                        float fR = valR / 8388608.0f;
+
+                        maxL = std::max(maxL, std::abs(fL));
+                        maxR = std::max(maxR, std::abs(fR));
+                        g_Waveform.push_back(fL);
                     }
                 }
                 
@@ -146,7 +152,7 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
 
     // Initialize miniaudio
     ma_device_config config = ma_device_config_init(ma_device_type_playback);
-    config.playback.format   = ma_format_s16;
+    config.playback.format   = ma_format_s24;
     config.playback.channels = 2;
     config.sampleRate        = 48000;
     config.dataCallback      = data_callback;
