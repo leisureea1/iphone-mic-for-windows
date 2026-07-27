@@ -24,13 +24,15 @@
 
 namespace iphone_mic {
 
+
 // ============================================================================
 // Constructor / Destructor
 // ============================================================================
 
 iPhoneAsioDriver::iPhoneAsioDriver()
     : ref_count_(1)
-    , ring_buffer_(std::make_shared<RingBuffer>(2 * 1024 * 1024))  // 2MB ring buffer
+    , input_ring_buffer_(std::make_shared<RingBuffer<AudioFrame>>(96000))
+    , output_ring_buffer_(std::make_shared<RingBuffer<AudioFrame>>(96000))
 {
     std::memset(error_message_, 0, sizeof(error_message_));
 }
@@ -257,9 +259,9 @@ ASIOError iPhoneAsioDriver::getChannelInfo(ASIOChannelInfo* info) {
             return ASE_InvalidParameter;
         }
         
-        // We output 32-bit integers (24-bit data shifted to fill 32-bit)
         info->type = ASIOSTInt32LSB;
         info->channelGroup = 0;
+        info->isActive = ASIOTrue;
         
         if (info->channel == 0) {
             strcpy_s(info->name, "iPhone Mic L");
@@ -267,8 +269,19 @@ ASIOError iPhoneAsioDriver::getChannelInfo(ASIOChannelInfo* info) {
             strcpy_s(info->name, "iPhone Mic R");
         }
     } else {
-        // No output channels
-        return ASE_InvalidParameter;
+        if (info->channel < 0 || info->channel >= NUM_OUTPUT_CHANNELS) {
+            return ASE_InvalidParameter;
+        }
+        
+        info->type = ASIOSTInt32LSB;
+        info->channelGroup = 1;
+        info->isActive = ASIOTrue;
+        
+        if (info->channel == 0) {
+            strcpy_s(info->name, "iPhone Output L");
+        } else {
+            strcpy_s(info->name, "iPhone Output R");
+        }
     }
     
     return ASE_OK;
@@ -283,7 +296,7 @@ ASIOError iPhoneAsioDriver::createBuffers(ASIOBufferInfo* bufferInfos,
                                             long bufferSize, 
                                             ASIOCallbacks* callbacks) {
     if (!bufferInfos || !callbacks) return ASE_InvalidParameter;
-    if (numChannels <= 0 || numChannels > NUM_INPUT_CHANNELS) 
+    if (numChannels <= 0 || numChannels > (NUM_INPUT_CHANNELS + NUM_OUTPUT_CHANNELS)) 
         return ASE_InvalidParameter;
     
     // Validate buffer size
@@ -299,6 +312,9 @@ ASIOError iPhoneAsioDriver::createBuffers(ASIOBufferInfo* bufferInfos,
     callbacks_ = callbacks;
     num_active_channels_ = numChannels;
     host_buffer_infos_ = bufferInfos;
+    
+    // Initialize IPC and output engine if needed
+    // We will do this in the next steps, for now just clear old buffers
     
     // Allocate channel buffers (Int32 format, double-buffered)
     size_t buffer_bytes = static_cast<size_t>(bufferSize) * sizeof(int32_t);
@@ -317,12 +333,6 @@ ASIOError iPhoneAsioDriver::createBuffers(ASIOBufferInfo* bufferInfos,
         bufferInfos[i].buffers[1] = cb.buffer_b.data();
     }
     
-    // Prepare temp buffers for format conversion
-    // Worst case: stereo, 24-bit, max buffer size
-    size_t max_pcm_bytes = static_cast<size_t>(bufferSize) * 3 * NUM_INPUT_CHANNELS;
-    temp_pcm_buffer_.resize(max_pcm_bytes, 0);
-    temp_int32_buffer_.resize(static_cast<size_t>(bufferSize) * NUM_INPUT_CHANNELS, 0);
-    
     return ASE_OK;
 }
 
@@ -335,9 +345,6 @@ ASIOError iPhoneAsioDriver::disposeBuffers() {
     host_buffer_infos_ = nullptr;
     callbacks_ = nullptr;
     num_active_channels_ = 0;
-    
-    temp_pcm_buffer_.clear();
-    temp_int32_buffer_.clear();
     
     return ASE_OK;
 }
@@ -431,6 +438,7 @@ void iPhoneAsioDriver::usb_client_thread_func() {
         
         // Receive loop
         parser.reset();
+        int current_channels = 1;
         
         while (usb_client_running_.load()) {
             int bytes = recv(sock, reinterpret_cast<char*>(recv_buffer.data()),
@@ -442,10 +450,21 @@ void iPhoneAsioDriver::usb_client_thread_func() {
                 PacketParser::ParsedPacket packet;
                 while (parser.try_parse(packet)) {
                     if (packet.header.packet_type() == PacketType::AudioData) {
+                        // Convert PCM16 to Float32 AudioFrames
+                        std::vector<AudioFrame> frames;
+                        audio_convert::pcm16_to_audio_frames(packet.payload.data(), packet.payload.size(), current_channels, frames);
+                        
                         // Write to ring buffer
-                        ring_buffer_->write(packet.payload.data(), 
-                                          packet.payload.size());
+                        if (input_ring_buffer_) {
+                            input_ring_buffer_->write(frames.data(), frames.size());
+                        }
                     } else if (packet.header.packet_type() == PacketType::Config) {
+                        std::string json(packet.payload.begin(), packet.payload.end());
+                        auto cfg = AudioConfig::from_json(json);
+                        if (cfg && cfg->channels > 0) {
+                            current_channels = cfg->channels;
+                        }
+                        
                         // Send ACK back
                         auto ack = iphone_mic::packet::build_config_ack();
                         send(sock, reinterpret_cast<const char*>(ack.data()),
@@ -553,66 +572,51 @@ void iPhoneAsioDriver::process_audio_buffer() {
     if (!callbacks_ || !running_) return;
     
     long buffer_index = current_buffer_index_;
+    size_t frames_needed = static_cast<size_t>(buffer_size_);
     
-    // Calculate how many PCM bytes we need from the ring buffer
-    // Ring buffer contains 16-bit interleaved PCM (2 bytes per sample per channel)
-    // We need buffer_size_ samples × channels × 2 bytes
-    size_t channels = static_cast<size_t>(NUM_INPUT_CHANNELS);
-    size_t pcm_bytes_needed = static_cast<size_t>(buffer_size_) * 2 * channels;
+    // ==========================================
+    // 1. Process INPUT (iPhone -> DAW)
+    // ==========================================
+    std::vector<AudioFrame> input_frames(frames_needed, {0.0f, 0.0f});
     
-    // Try to read from ring buffer
-    size_t bytes_read = ring_buffer_->read(temp_pcm_buffer_.data(), pcm_bytes_needed);
-    
-    if (bytes_read < pcm_bytes_needed) {
-        // Not enough data - fill what we have and zero the rest
-        if (bytes_read > 0) {
-            std::memset(temp_pcm_buffer_.data() + bytes_read, 0, 
-                       pcm_bytes_needed - bytes_read);
-        } else {
-            // Complete silence
-            fill_silence(buffer_index);
-            goto callback;
+    if (input_ring_buffer_) {
+        size_t frames_read = input_ring_buffer_->read(input_frames.data(), frames_needed);
+        if (frames_read < frames_needed) {
+            // Not enough data - the vector is already zero-initialized for the remainder
         }
     }
     
-    // Convert 16-bit interleaved PCM to 32-bit per-channel ASIO buffers
-    {
-        size_t total_samples = static_cast<size_t>(buffer_size_) * channels;
+    // De-interleave into per-channel ASIO buffers
+    for (long ch_idx = 0; ch_idx < num_active_channels_; ++ch_idx) {
+        auto& cb = channel_buffers_[ch_idx];
+        if (!cb.is_input) continue; // Only process input channels here
         
-        // First convert all interleaved samples to int32
-        audio_convert::convert_int16_to_int32(temp_pcm_buffer_.data(), 
-                                               temp_int32_buffer_.data(), 
-                                               total_samples);
+        int32_t* dst = reinterpret_cast<int32_t*>(
+            buffer_index == 0 ? cb.buffer_a.data() : cb.buffer_b.data()
+        );
         
-        // De-interleave into per-channel ASIO buffers
-        for (long ch_idx = 0; ch_idx < num_active_channels_; ++ch_idx) {
-            auto& cb = channel_buffers_[ch_idx];
-            int32_t* dst = reinterpret_cast<int32_t*>(
-                buffer_index == 0 ? cb.buffer_a.data() : cb.buffer_b.data()
-            );
-            
-            long src_channel = cb.channel_num;
-            
-            // Extract this channel from interleaved data
-            if (src_channel < static_cast<long>(channels)) {
-                for (long s = 0; s < buffer_size_; ++s) {
-                    dst[s] = temp_int32_buffer_[s * channels + src_channel];
-                }
-            } else {
-                // Channel not available, fill with silence
-                std::memset(dst, 0, static_cast<size_t>(buffer_size_) * sizeof(int32_t));
+        long src_channel = cb.channel_num;
+        
+        if (src_channel == 0) { // Left
+            for (long s = 0; s < buffer_size_; ++s) {
+                dst[s] = static_cast<int32_t>(input_frames[s].left * 2147483520.0f);
             }
+        } else if (src_channel == 1) { // Right
+            for (long s = 0; s < buffer_size_; ++s) {
+                dst[s] = static_cast<int32_t>(input_frames[s].right * 2147483520.0f);
+            }
+        } else {
+            std::memset(dst, 0, frames_needed * sizeof(int32_t));
         }
     }
     
-callback:
+    // ==========================================
+    // 2. Call host's buffer switch callback
+    // ==========================================
+    
     // Update sample position
     sample_position_.fetch_add(buffer_size_);
     
-    // Toggle buffer index
-    current_buffer_index_ = 1 - buffer_index;
-    
-    // Call host's buffer switch callback
     if (callbacks_->bufferSwitchTimeInfo) {
         ASIOTime time{};
         uint64_t pos = sample_position_.load();
@@ -635,13 +639,50 @@ callback:
     } else if (callbacks_->bufferSwitch) {
         callbacks_->bufferSwitch(buffer_index, ASIOTrue);
     }
+    
+    // ==========================================
+    // 3. Process OUTPUT (DAW -> Output Device)
+    // ==========================================
+    
+    std::vector<AudioFrame> output_frames(frames_needed, {0.0f, 0.0f});
+    
+    bool has_output = false;
+    for (long ch_idx = 0; ch_idx < num_active_channels_; ++ch_idx) {
+        auto& cb = channel_buffers_[ch_idx];
+        if (cb.is_input) continue; // Only process output channels here
+        
+        has_output = true;
+        const float* src = reinterpret_cast<const float*>(
+            buffer_index == 0 ? cb.buffer_a.data() : cb.buffer_b.data()
+        );
+        
+        long dst_channel = cb.channel_num;
+        
+        if (dst_channel == 0) { // Left
+            for (long s = 0; s < buffer_size_; ++s) {
+                output_frames[s].left = src[s];
+            }
+        } else if (dst_channel == 1) { // Right
+            for (long s = 0; s < buffer_size_; ++s) {
+                output_frames[s].right = src[s];
+            }
+        }
+    }
+    
+    if (has_output && output_ring_buffer_) {
+        // Write to output ring buffer. If it overflows, it drops frames.
+        output_ring_buffer_->write(output_frames.data(), frames_needed);
+    }
+    
+    // Toggle buffer index
+    current_buffer_index_ = 1 - buffer_index;
 }
 
 void iPhoneAsioDriver::fill_silence(long buffer_index) {
     for (long ch = 0; ch < num_active_channels_; ++ch) {
         auto& cb = channel_buffers_[ch];
         void* buf = (buffer_index == 0) ? cb.buffer_a.data() : cb.buffer_b.data();
-        std::memset(buf, 0, static_cast<size_t>(buffer_size_) * sizeof(int32_t));
+        std::memset(buf, 0, static_cast<size_t>(buffer_size_) * sizeof(float));
     }
 }
 
