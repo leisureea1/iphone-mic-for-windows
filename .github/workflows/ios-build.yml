@@ -1,0 +1,51 @@
+name: Build iOS IPA
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  pull_request:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+jobs:
+  build-ios:
+    name: Build unsigned iOS IPA
+    runs-on: macos-14
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode Project
+        working-directory: ios/iPhoneMic
+        run: xcodegen generate
+
+      - name: Build iOS App
+        working-directory: ios/iPhoneMic
+        run: |
+          xcodebuild clean build \
+            -project iPhoneMic.xcodeproj \
+            -scheme iPhoneMic \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath build \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO
+
+      - name: Package IPA
+        working-directory: ios/iPhoneMic
+        run: |
+          mkdir -p Payload
+          mv build/Build/Products/Release-iphoneos/iPhoneMic.app Payload/
+          zip -r iPhoneMic.ipa Payload
+          
+      - name: Upload IPA Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: iPhoneMic-IPA
+          path: ios/iPhoneMic/iPhoneMic.ipa
+          retention-days: 7

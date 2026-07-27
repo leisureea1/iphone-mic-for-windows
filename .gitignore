@@ -1,0 +1,21 @@
+# Windows build
+/windows/build/
+*.exe
+*.dll
+*.lib
+*.exp
+*.obj
+*.pdb
+*.suo
+*.user
+.vs/
+
+# iOS build
+/ios/iPhoneMic/build/
+/ios/iPhoneMic/Payload/
+*.ipa
+*.xcodeproj/
+.DS_Store
+
+# Other
+/scripts/build/

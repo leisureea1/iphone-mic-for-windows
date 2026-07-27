@@ -1,0 +1,10 @@
+; iphone_asio_driver.def
+; Module definition file for the ASIO driver DLL
+; Exports the required COM entry points
+
+LIBRARY     "iphone_asio_driver"
+EXPORTS
+    DllGetClassObject   PRIVATE
+    DllCanUnloadNow     PRIVATE
+    DllRegisterServer   PRIVATE
+    DllUnregisterServer PRIVATE

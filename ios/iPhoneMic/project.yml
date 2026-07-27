@@ -1,0 +1,30 @@
+name: iPhoneMic
+options:
+  bundleIdPrefix: com.leisureea1
+  deploymentTarget:
+    iOS: "16.0"
+targets:
+  iPhoneMic:
+    type: application
+    platform: iOS
+    sources:
+      - path: iPhoneMic
+    info:
+      path: iPhoneMic/Info.plist
+      properties:
+        UILaunchScreen: {}
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+          UISceneConfigurations: {}
+        NSMicrophoneUsageDescription: "App requires microphone access to transmit audio to Windows."
+        UIBackgroundModes:
+          - audio
+    settings:
+      base:
+        INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        SWIFT_VERSION: 5.9
+        CODE_SIGN_IDENTITY: ""
+        CODE_SIGNING_REQUIRED: "NO"
+        CODE_SIGNING_ALLOWED: "NO"
+        ENABLE_BITCODE: "NO"

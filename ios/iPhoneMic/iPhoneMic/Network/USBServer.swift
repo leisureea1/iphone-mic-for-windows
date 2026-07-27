@@ -1,0 +1,341 @@
+// USBServer.swift
+// iPhoneMic
+//
+// TCP server using Network.framework (NWListener) for USB communication.
+// Listens on a configurable port. When iPhone is connected via USB,
+// Windows uses usbmuxd/iproxy to tunnel TCP to this port.
+
+import Foundation
+import Network
+
+@MainActor
+final class USBServer: ObservableObject {
+    
+    // MARK: - Published State
+    
+    @Published var connectionState: ConnectionState = .disconnected
+    @Published var bytesSent: UInt64 = 0
+    @Published var packetsDropped: UInt64 = 0
+    
+    // MARK: - Configuration
+    
+    private let port: UInt16
+    private let config: AudioConfig
+    
+    // MARK: - Network Objects
+    
+    private var listener: NWListener?
+    private var activeConnection: NWConnection?
+    private var heartbeatTimer: DispatchSourceTimer?
+    
+    // Queue for network operations
+    private let networkQueue = DispatchQueue(
+        label: "com.iphonemic.network",
+        qos: .userInteractive
+    )
+    
+    // Send control
+    private var isSending = false
+    private var pendingData: [Data] = []
+    private let maxPendingPackets = 8  // Drop packets if too many pending
+    
+    // MARK: - Init
+    
+    init(port: UInt16 = kDefaultPort, config: AudioConfig) {
+        self.port = port
+        self.config = config
+    }
+    
+    // MARK: - Public API
+    
+    /// Start the TCP listener
+    func startListening() {
+        guard listener == nil else { return }
+        
+        do {
+            // Configure TCP parameters for low latency
+            let parameters = NWParameters.tcp
+            parameters.serviceClass = .interactiveVideo  // Low latency priority
+            
+            // Set TCP no-delay (disable Nagle's algorithm)
+            if let tcpOptions = parameters.defaultProtocolStack
+                .internetProtocol as? NWProtocolIP.Options {
+                // IP level options set automatically
+            }
+            
+            let nwPort = NWEndpoint.Port(rawValue: port)!
+            listener = try NWListener(using: parameters, on: nwPort)
+            
+            listener?.stateUpdateHandler = { [weak self] state in
+                DispatchQueue.main.async {
+                    self?.handleListenerState(state)
+                }
+            }
+            
+            listener?.newConnectionHandler = { [weak self] connection in
+                DispatchQueue.main.async {
+                    self?.handleNewConnection(connection)
+                }
+            }
+            
+            listener?.start(queue: networkQueue)
+            connectionState = .waitingForConnection
+            
+            print("[USBServer] Listener started on port \(port)")
+            
+        } catch {
+            connectionState = .error(message: "监听失败: \(error.localizedDescription)")
+            print("[USBServer] Failed to start listener: \(error)")
+        }
+    }
+    
+    /// Stop the TCP listener and disconnect
+    func stopListening() {
+        stopHeartbeat()
+        
+        activeConnection?.cancel()
+        activeConnection = nil
+        
+        listener?.cancel()
+        listener = nil
+        
+        connectionState = .disconnected
+        bytesSent = 0
+        packetsDropped = 0
+        isSending = false
+        pendingData.removeAll()
+        
+        print("[USBServer] Server stopped")
+    }
+    
+    /// Send audio PCM data to the connected client.
+    /// Called from the audio capture callback.
+    func sendAudioData(_ pcmData: Data) {
+        guard activeConnection != nil else { return }
+        
+        let packet = PacketBuilder.buildAudioPacket(pcmData: pcmData)
+        enqueueAndSend(packet)
+    }
+    
+    /// Send current audio config to the client
+    func sendConfig() {
+        guard activeConnection != nil else { return }
+        
+        let configPacket = config.toConfigPacket()
+        if let packet = PacketBuilder.buildConfigPacket(config: configPacket) {
+            enqueueAndSend(packet)
+        }
+    }
+    
+    // MARK: - Private: Connection Handling
+    
+    private func handleListenerState(_ state: NWListener.State) {
+        switch state {
+        case .ready:
+            print("[USBServer] Listener ready on port \(port)")
+            connectionState = .waitingForConnection
+            
+        case .failed(let error):
+            print("[USBServer] Listener failed: \(error)")
+            connectionState = .error(message: error.localizedDescription)
+            
+            // Try to restart after a delay
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+                self?.listener?.cancel()
+                self?.listener = nil
+                self?.startListening()
+            }
+            
+        case .cancelled:
+            print("[USBServer] Listener cancelled")
+            
+        default:
+            break
+        }
+    }
+    
+    private func handleNewConnection(_ connection: NWConnection) {
+        // Only allow one active connection at a time
+        if let existing = activeConnection {
+            print("[USBServer] Replacing existing connection")
+            existing.cancel()
+        }
+        
+        activeConnection = connection
+        
+        let endpoint = connection.endpoint
+        let peerName: String
+        switch endpoint {
+        case .hostPort(let host, let port):
+            peerName = "\(host):\(port)"
+        default:
+            peerName = "Unknown"
+        }
+        
+        connection.stateUpdateHandler = { [weak self] state in
+            DispatchQueue.main.async {
+                self?.handleConnectionState(state, peerName: peerName)
+            }
+        }
+        
+        connection.start(queue: networkQueue)
+        
+        print("[USBServer] New connection from \(peerName)")
+    }
+    
+    private func handleConnectionState(_ state: NWConnection.State, peerName: String) {
+        switch state {
+        case .ready:
+            print("[USBServer] Connection ready: \(peerName)")
+            connectionState = .connected(peerName: peerName)
+            isSending = false
+            pendingData.removeAll()
+            
+            // Send initial config
+            sendConfig()
+            
+            // Start heartbeat
+            startHeartbeat()
+            
+            // Start receiving (for config ACK, etc.)
+            startReceiving()
+            
+        case .failed(let error):
+            print("[USBServer] Connection failed: \(error)")
+            connectionState = .waitingForConnection
+            activeConnection = nil
+            stopHeartbeat()
+            
+        case .cancelled:
+            print("[USBServer] Connection cancelled")
+            connectionState = .waitingForConnection
+            activeConnection = nil
+            stopHeartbeat()
+            
+        default:
+            break
+        }
+    }
+    
+    // MARK: - Private: Data Sending
+    
+    private func enqueueAndSend(_ data: Data) {
+        networkQueue.async { [weak self] in
+            guard let self = self else { return }
+            
+            if self.isSending {
+                // Queue the data if we're currently sending
+                if self.pendingData.count < self.maxPendingPackets {
+                    self.pendingData.append(data)
+                } else {
+                    // Drop oldest packet to make room
+                    self.pendingData.removeFirst()
+                    self.pendingData.append(data)
+                    DispatchQueue.main.async {
+                        self.packetsDropped += 1
+                    }
+                }
+                return
+            }
+            
+            self.isSending = true
+            self.sendData(data)
+        }
+    }
+    
+    private func sendData(_ data: Data) {
+        guard let connection = activeConnection else {
+            isSending = false
+            return
+        }
+        
+        connection.send(content: data, completion: .contentProcessed { [weak self] error in
+            guard let self = self else { return }
+            
+            if let error = error {
+                print("[USBServer] Send error: \(error)")
+                self.isSending = false
+                return
+            }
+            
+            DispatchQueue.main.async {
+                self.bytesSent += UInt64(data.count)
+            }
+            
+            // Send next pending packet if any
+            self.networkQueue.async {
+                if let next = self.pendingData.first {
+                    self.pendingData.removeFirst()
+                    self.sendData(next)
+                } else {
+                    self.isSending = false
+                }
+            }
+        })
+    }
+    
+    // MARK: - Private: Receiving
+    
+    private func startReceiving() {
+        guard let connection = activeConnection else { return }
+        
+        connection.receive(minimumIncompleteLength: Int(PacketHeader.size),
+                          maximumLength: 65536) { [weak self] data, _, isComplete, error in
+            
+            if let data = data, !data.isEmpty {
+                // Parse incoming packets (config changes, etc.)
+                self?.handleReceivedData(data)
+            }
+            
+            if isComplete {
+                DispatchQueue.main.async {
+                    self?.connectionState = .waitingForConnection
+                    self?.activeConnection = nil
+                }
+                return
+            }
+            
+            if error == nil {
+                // Continue receiving
+                self?.startReceiving()
+            }
+        }
+    }
+    
+    private func handleReceivedData(_ data: Data) {
+        // Parse packet header
+        guard let header = PacketHeader.deserialize(from: data) else { return }
+        
+        switch header.type {
+        case .configAck:
+            print("[USBServer] Config acknowledged by client")
+        case .config:
+            // Client requesting config change - handle if needed
+            print("[USBServer] Received config request from client")
+        default:
+            break
+        }
+    }
+    
+    // MARK: - Private: Heartbeat
+    
+    private func startHeartbeat() {
+        stopHeartbeat()
+        
+        let timer = DispatchSource.makeTimerSource(queue: networkQueue)
+        timer.schedule(deadline: .now() + kHeartbeatInterval,
+                      repeating: kHeartbeatInterval)
+        timer.setEventHandler { [weak self] in
+            guard let self = self, self.activeConnection != nil else { return }
+            let packet = PacketBuilder.buildHeartbeatPacket()
+            self.enqueueAndSend(packet)
+        }
+        timer.resume()
+        heartbeatTimer = timer
+    }
+    
+    private func stopHeartbeat() {
+        heartbeatTimer?.cancel()
+        heartbeatTimer = nil
+    }
+}

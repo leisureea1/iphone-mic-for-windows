@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Microphone usage description (required for App Store) -->
+    <key>NSMicrophoneUsageDescription</key>
+    <string>iPhoneMic 需要使用麦克风来采集音频并通过 USB 传输到您的电脑，用作专业音频输入设备。</string>
+    
+    <!-- Allow local network access (for USB tunneled TCP) -->
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>iPhoneMic 使用本地网络通过 USB 连接传输实时音频数据到电脑。</string>
+    
+    <!-- Bonjour services (if needed for discovery) -->
+    <key>NSBonjourServices</key>
+    <array>
+        <string>_iphonemic._tcp</string>
+    </array>
+    
+    <!-- Background audio mode -->
+    <key>UIBackgroundModes</key>
+    <array>
+        <string>audio</string>
+    </array>
+    
+    <!-- App display name -->
+    <key>CFBundleDisplayName</key>
+    <string>iPhoneMic</string>
+    
+    <!-- Bundle identifier -->
+    <key>CFBundleIdentifier</key>
+    <string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+    
+    <!-- Version -->
+    <key>CFBundleShortVersionString</key>
+    <string>1.0</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    
+    <!-- Minimum iOS version -->
+    <key>MinimumOSVersion</key>
+    <string>16.0</string>
+    
+    <!-- Supported orientations -->
+    <key>UISupportedInterfaceOrientations</key>
+    <array>
+        <string>UIInterfaceOrientationPortrait</string>
+    </array>
+    
+    <!-- Launch storyboard -->
+    <key>UILaunchStoryboardName</key>
+    <string>LaunchScreen</string>
+</dict>
+</plist>
