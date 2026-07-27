@@ -49,9 +49,82 @@ std::atomic<bool> g_MonitorAudio = false;
 std::atomic<int> g_AudioChannels = 1;
 std::unique_ptr<RingBuffer<iphone_mic::AudioFrame>> g_AudioRingBuffer;
 ma_device g_AudioDevice;
+bool g_AudioDeviceReady = false;
 
 bool g_IsPrebuffered = false;
 const size_t PREBUFFER_FRAMES = 48000 * 20 / 1000; // 20ms of audio (960 frames)
+
+// Forward declaration for miniaudio callback
+void data_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma_uint32 frameCount);
+
+// Output device enumeration
+struct OutputDeviceInfo {
+    ma_device_id id;
+    std::string name;
+    bool is_default;
+};
+std::vector<OutputDeviceInfo> g_OutputDevices;
+int g_SelectedDeviceIndex = 0;  // 0 = system default
+bool g_NeedDeviceRefresh = true;
+
+void EnumerateOutputDevices() {
+    g_OutputDevices.clear();
+    
+    // First entry: system default
+    OutputDeviceInfo defaultDev;
+    defaultDev.name = "System Default";
+    defaultDev.is_default = true;
+    g_OutputDevices.push_back(defaultDev);
+    
+    ma_context context;
+    if (ma_context_init(NULL, 0, NULL, &context) != MA_SUCCESS) return;
+    
+    ma_device_info* pPlaybackDevices;
+    ma_uint32 playbackCount;
+    ma_device_info* pCaptureDevices;
+    ma_uint32 captureCount;
+    
+    if (ma_context_get_devices(&context, &pPlaybackDevices, &playbackCount, &pCaptureDevices, &captureCount) == MA_SUCCESS) {
+        for (ma_uint32 i = 0; i < playbackCount; i++) {
+            OutputDeviceInfo info;
+            info.id = pPlaybackDevices[i].id;
+            info.name = pPlaybackDevices[i].name;
+            info.is_default = pPlaybackDevices[i].isDefault != 0;
+            g_OutputDevices.push_back(info);
+        }
+    }
+    
+    ma_context_uninit(&context);
+    g_NeedDeviceRefresh = false;
+}
+
+void SwitchOutputDevice(int deviceIndex) {
+    // Stop and uninit current device
+    if (g_AudioDeviceReady) {
+        ma_device_uninit(&g_AudioDevice);
+        g_AudioDeviceReady = false;
+    }
+    
+    g_SelectedDeviceIndex = deviceIndex;
+    g_IsPrebuffered = false;
+    
+    ma_device_config config = ma_device_config_init(ma_device_type_playback);
+    config.playback.format   = ma_format_f32;
+    config.playback.channels = 2;
+    config.sampleRate        = 48000;
+    config.dataCallback      = data_callback;
+    config.pUserData         = nullptr;
+    
+    // Set specific device if not "System Default"
+    if (deviceIndex > 0 && deviceIndex < (int)g_OutputDevices.size()) {
+        config.playback.pDeviceID = &g_OutputDevices[deviceIndex].id;
+    }
+    
+    if (ma_device_init(NULL, &config, &g_AudioDevice) == MA_SUCCESS) {
+        ma_device_start(&g_AudioDevice);
+        g_AudioDeviceReady = true;
+    }
+}
 
 void data_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma_uint32 frameCount)
 {
@@ -163,19 +236,9 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
     // Initialize audio ring buffer (48000 frames * 2 seconds = 96000 frames)
     g_AudioRingBuffer = std::make_unique<RingBuffer<iphone_mic::AudioFrame>>(96000);
 
-    // Initialize miniaudio
-    ma_device_config config = ma_device_config_init(ma_device_type_playback);
-    config.playback.format   = ma_format_f32;
-    config.playback.channels = 2;
-    config.sampleRate        = 48000;
-    config.dataCallback      = data_callback;
-    config.pUserData         = nullptr;
-
-    if (ma_device_init(NULL, &config, &g_AudioDevice) != MA_SUCCESS) {
-        // Failed to initialize audio device
-    } else {
-        ma_device_start(&g_AudioDevice);
-    }
+    // Enumerate and initialize audio output device
+    EnumerateOutputDevices();
+    SwitchOutputDevice(0);  // Start with system default
 
     // Create application window
     WNDCLASSEXW wc = { sizeof(wc), CS_CLASSDC, WndProc, 0L, 0L, hInstance, nullptr, nullptr, nullptr, nullptr, L"iPhoneMic GUI", nullptr };
@@ -297,6 +360,43 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
         ImGui::Separator();
         ImGui::Text("Audio Monitoring");
         
+        // Output device selector
+        if (g_NeedDeviceRefresh) {
+            EnumerateOutputDevices();
+        }
+        
+        if (ImGui::Button("Refresh Devices")) {
+            EnumerateOutputDevices();
+        }
+        ImGui::SameLine();
+        
+        // Build device name list for combo
+        if (!g_OutputDevices.empty()) {
+            const char* currentName = (g_SelectedDeviceIndex < (int)g_OutputDevices.size()) 
+                ? g_OutputDevices[g_SelectedDeviceIndex].name.c_str() 
+                : "Unknown";
+            
+            if (ImGui::BeginCombo("Output Device", currentName)) {
+                for (int i = 0; i < (int)g_OutputDevices.size(); i++) {
+                    bool isSelected = (g_SelectedDeviceIndex == i);
+                    std::string label = g_OutputDevices[i].name;
+                    if (i == 0) label += " (Default)";
+                    
+                    if (ImGui::Selectable(label.c_str(), isSelected)) {
+                        if (i != g_SelectedDeviceIndex) {
+                            SwitchOutputDevice(i);
+                        }
+                    }
+                    if (isSelected) {
+                        ImGui::SetItemDefaultFocus();
+                    }
+                }
+                ImGui::EndCombo();
+            }
+        }
+        
+        ImGui::Spacing();
+        
         bool monitor = g_MonitorAudio;
         if (ImGui::Checkbox("Monitor Audio (Listen to iPhone Microphone)", &monitor)) {
             g_MonitorAudio = monitor;
@@ -324,7 +424,10 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
     usbThread.join();
 
     // Cleanup audio
-    ma_device_uninit(&g_AudioDevice);
+    if (g_AudioDeviceReady) {
+        ma_device_uninit(&g_AudioDevice);
+        g_AudioDeviceReady = false;
+    }
     g_AudioRingBuffer.reset();
 
     // Cleanup
