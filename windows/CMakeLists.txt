@@ -126,7 +126,7 @@ target_include_directories(audio_format_test PRIVATE ${COMMON_INCLUDE_DIR})
 # ============================================================================
 # GUI Application
 # ============================================================================
-add_subdirectory(gui)
+add_subdirectory(backend)
 
 # ============================================================================
 # Compiler Options
@@ -147,7 +147,7 @@ endif()
 # Install
 # ============================================================================
 
-install(TARGETS iphone_mic_client iphone_asio_driver iphone_mic_gui
+install(TARGETS iphone_mic_client iphone_asio_driver iphone_mic_backend
     RUNTIME DESTINATION bin
     LIBRARY DESTINATION lib
 )

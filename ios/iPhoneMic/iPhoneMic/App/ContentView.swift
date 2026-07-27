@@ -261,7 +261,7 @@ struct ContentView: View {
                 
                 // Bit Depth
                 configRow(title: "位深") {
-                    Text("24 bit")
+                    Text("16 bit")
                         .font(.system(size: 14, weight: .semibold, design: .monospaced))
                         .foregroundColor(Color(hex: "8b5cf6"))
                 }
