@@ -9,8 +9,15 @@
 #include <cstring>
 #include <cmath>
 #include <algorithm>
+#include <vector>
 
 namespace iphone_mic {
+
+// Represents a standard interleaved stereo float audio frame
+struct AudioFrame {
+    float left;
+    float right;
+};
 
 // Audio sample format types used internally
 enum class SampleFormat {
@@ -52,13 +59,26 @@ inline float int16_to_float32(const uint8_t* src) {
     return static_cast<float>(val) / 32768.0f;
 }
 
-/// Convert float32 [-1.0, 1.0] to 16-bit LE (2 bytes)
-inline void float32_to_int16(float val, uint8_t* dst) {
-    // Clamp
-    val = std::clamp(val, -1.0f, 1.0f);
-    int16_t i = static_cast<int16_t>(val * 32767.0f);
-    dst[0] = static_cast<uint8_t>(i & 0xFF);
-    dst[1] = static_cast<uint8_t>((i >> 8) & 0xFF);
+inline void pcm16_to_audio_frames(const uint8_t* src, size_t num_bytes, int channels, std::vector<AudioFrame>& out_frames) {
+    if (channels == 0) return;
+    size_t num_samples = num_bytes / 2;
+    size_t num_frames = num_samples / channels;
+    out_frames.clear();
+    out_frames.reserve(num_frames);
+    
+    const int16_t* pcm16 = reinterpret_cast<const int16_t*>(src);
+    for (size_t i = 0; i < num_frames; ++i) {
+        AudioFrame frame;
+        if (channels == 1) {
+            float val = static_cast<float>(pcm16[i]) / 32768.0f;
+            frame.left = val;
+            frame.right = val;
+        } else {
+            frame.left = static_cast<float>(pcm16[i * channels]) / 32768.0f;
+            frame.right = static_cast<float>(pcm16[i * channels + 1]) / 32768.0f;
+        }
+        out_frames.push_back(frame);
+    }
 }
 
 // ============================================================================

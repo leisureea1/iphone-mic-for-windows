@@ -163,8 +163,8 @@ int main(int argc, char* argv[]) {
     // Install signal handler
     signal(SIGINT, signal_handler);
     
-    // Create ring buffer (4 MB)
-    auto ring_buffer = std::make_shared<RingBuffer>(4 * 1024 * 1024);
+    // Create ring buffer (48000 frames * 2 seconds = 96000 frames)
+    auto ring_buffer = std::make_shared<RingBuffer<iphone_mic::AudioFrame>>(96000);
     
     // Connection strategy
     if (opts.use_iproxy) {
@@ -194,20 +194,20 @@ int main(int argc, char* argv[]) {
             save_file.open(opts.save_file, std::ios::binary);
         }
         
-        std::vector<uint8_t> read_buffer(4096);
-        uint64_t total_bytes_read = 0;
+        std::vector<iphone_mic::AudioFrame> read_buffer(2048);
+        uint64_t total_frames_read = 0;
         
         while (g_running.load()) {
             auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
                 std::chrono::steady_clock::now() - start_time);
             if (elapsed.count() >= opts.duration_sec) break;
             
-            size_t bytes_read = ring_buffer->read(read_buffer.data(), read_buffer.size());
-            if (bytes_read > 0) {
-                total_bytes_read += bytes_read;
+            size_t frames_read = ring_buffer->read(read_buffer.data(), read_buffer.size());
+            if (frames_read > 0) {
+                total_frames_read += frames_read;
                 if (save_file.is_open()) {
                     save_file.write(reinterpret_cast<const char*>(read_buffer.data()), 
-                                   bytes_read);
+                                   frames_read * sizeof(iphone_mic::AudioFrame));
                 }
             } else {
                 Sleep(1);
@@ -218,7 +218,7 @@ int main(int argc, char* argv[]) {
         
         if (save_file.is_open()) {
             save_file.close();
-            std::cout << "\nSaved " << total_bytes_read << " bytes to " 
+            std::cout << "\nSaved " << total_frames_read * sizeof(iphone_mic::AudioFrame) << " bytes to " 
                       << opts.save_file << std::endl;
         }
         
@@ -240,6 +240,7 @@ int main(int argc, char* argv[]) {
         std::vector<uint8_t> read_buffer(4096);
         uint64_t total_bytes_read = 0;
         uint64_t packets_received = 0;
+        int current_channels = 1;
         
         auto start_time = std::chrono::steady_clock::now();
         auto last_stats_time = start_time;
@@ -296,9 +297,11 @@ int main(int argc, char* argv[]) {
                                     packet.payload.size());
                             }
                             
+                            std::vector<iphone_mic::AudioFrame> audioFrames;
+                            iphone_mic::audio_convert::pcm16_to_audio_frames(packet.payload.data(), packet.payload.size(), current_channels, audioFrames);
+                            
                             // Write to ring buffer
-                            ring_buffer->write(packet.payload.data(), 
-                                             packet.payload.size());
+                            ring_buffer->write(audioFrames.data(), audioFrames.size());
                             
                             // Display levels
                             if (opts.verbose && packet.payload.size() >= 2) {
@@ -319,6 +322,7 @@ int main(int argc, char* argv[]) {
                                            packet.payload.end());
                             auto config = AudioConfig::from_json(json);
                             if (config) {
+                                if (config->channels > 0) current_channels = config->channels;
                                 std::cout << "[Config] " << config->sample_rate 
                                           << "Hz, " << config->bit_depth << "bit, "
                                           << config->channels << "ch, buf=" 

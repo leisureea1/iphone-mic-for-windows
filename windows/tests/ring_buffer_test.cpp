@@ -30,7 +30,7 @@ static std::vector<TestEntry> tests;
 // ============================================================================
 
 TEST(basic_write_read) {
-    RingBuffer rb(1024);
+    RingBuffer<uint8_t> rb(1024);
     
     uint8_t data[] = {1, 2, 3, 4, 5};
     assert(rb.write(data, 5) == 5);
@@ -43,14 +43,14 @@ TEST(basic_write_read) {
 }
 
 TEST(empty_read) {
-    RingBuffer rb(1024);
+    RingBuffer<uint8_t> rb(1024);
     uint8_t out[10];
     assert(rb.read(out, 10) == 0);
     assert(rb.empty());
 }
 
 TEST(full_write) {
-    RingBuffer rb(64);  // Will be rounded to 64 (already power of 2)
+    RingBuffer<uint8_t> rb(64);  // Will be rounded to 64 (already power of 2)
     
     std::vector<uint8_t> data(64);
     std::iota(data.begin(), data.end(), 0);
@@ -64,7 +64,7 @@ TEST(full_write) {
 }
 
 TEST(wraparound) {
-    RingBuffer rb(64);
+    RingBuffer<uint8_t> rb(64);
     
     // Write 48 bytes
     std::vector<uint8_t> data1(48, 0xAA);
@@ -89,7 +89,7 @@ TEST(wraparound) {
 }
 
 TEST(peek) {
-    RingBuffer rb(1024);
+    RingBuffer<uint8_t> rb(1024);
     
     uint8_t data[] = {10, 20, 30};
     rb.write(data, 3);
@@ -105,7 +105,7 @@ TEST(peek) {
 }
 
 TEST(reset) {
-    RingBuffer rb(1024);
+    RingBuffer<uint8_t> rb(1024);
     
     uint8_t data[] = {1, 2, 3};
     rb.write(data, 3);
@@ -117,7 +117,7 @@ TEST(reset) {
 }
 
 TEST(fill_ratio) {
-    RingBuffer rb(1024);
+    RingBuffer<uint8_t> rb(1024);
     assert(rb.fill_ratio() == 0.0f);
     
     std::vector<uint8_t> data(512);
@@ -131,7 +131,7 @@ TEST(concurrent_spsc) {
     static constexpr size_t TOTAL_BYTES = 10 * 1024 * 1024;  // 10 MB
     static constexpr size_t CHUNK_SIZE = 768;  // Intentionally not power of 2
     
-    RingBuffer rb(65536);
+    RingBuffer<uint8_t> rb(65536);
     std::atomic<bool> done{false};
     size_t total_read = 0;
     bool corruption_detected = false;
@@ -199,7 +199,7 @@ TEST(audio_buffer_sizes) {
         // 24-bit stereo: 3 bytes * 2 channels * buffer_size
         size_t frame_bytes = 3 * 2 * buf_size;
         
-        RingBuffer rb(frame_bytes * 16);  // Hold 16 buffers
+        RingBuffer<uint8_t> rb(frame_bytes * 16);  // Hold 16 buffers
         
         std::vector<uint8_t> write_buf(frame_bytes, 0x42);
         std::vector<uint8_t> read_buf(frame_bytes);

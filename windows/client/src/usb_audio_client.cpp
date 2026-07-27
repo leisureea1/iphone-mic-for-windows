@@ -55,7 +55,7 @@ private:
 // ============================================================================
 
 UsbAudioClient::UsbAudioClient(const std::string& host, uint16_t port,
-                                 std::shared_ptr<RingBuffer> ring_buffer)
+                                 std::shared_ptr<RingBuffer<AudioFrame>> ring_buffer)
     : host_(host)
     , port_(port)
     , ring_buffer_(std::move(ring_buffer))
@@ -309,10 +309,19 @@ void UsbAudioClient::handle_packet(const PacketParser::ParsedPacket& packet) {
 void UsbAudioClient::handle_audio_data(const std::vector<uint8_t>& payload) {
     if (payload.empty() || !ring_buffer_) return;
     
-    // Write PCM data to ring buffer
-    size_t written = ring_buffer_->write(payload.data(), payload.size());
+    // Convert 16-bit PCM to Float32 AudioFrames
+    std::vector<AudioFrame> frames;
+    int channels = 1;
+    {
+        std::lock_guard<std::mutex> lock(config_mutex_);
+        channels = audio_config_.channels > 0 ? audio_config_.channels : 1;
+    }
+    audio_convert::pcm16_to_audio_frames(payload.data(), payload.size(), channels, frames);
     
-    if (written < payload.size()) {
+    // Write AudioFrames to ring buffer
+    size_t written = ring_buffer_->write(frames.data(), frames.size());
+    
+    if (written < frames.size()) {
         std::lock_guard<std::mutex> lock(stats_mutex_);
         stats_.packets_dropped++;
     }

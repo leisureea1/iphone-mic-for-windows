@@ -46,7 +46,7 @@ public:
     /// @param port  Port to connect to (default: 8730)
     /// @param ring_buffer  Shared ring buffer for audio data output
     UsbAudioClient(const std::string& host, uint16_t port,
-                   std::shared_ptr<RingBuffer> ring_buffer);
+                   std::shared_ptr<RingBuffer<AudioFrame>> ring_buffer);
     
     ~UsbAudioClient();
     
@@ -103,7 +103,7 @@ private:
     uint16_t port_;
     
     // Ring buffer (shared with ASIO driver)
-    std::shared_ptr<RingBuffer> ring_buffer_;
+    std::shared_ptr<RingBuffer<AudioFrame>> ring_buffer_;
     
     // Network
     uintptr_t socket_ = ~0ULL;  // INVALID_SOCKET

@@ -50,7 +50,7 @@ constexpr long DRIVER_VERSION = 1;
 
 // Audio parameters
 constexpr long NUM_INPUT_CHANNELS  = 2;  // Stereo (can use mono from 1st channel)
-constexpr long NUM_OUTPUT_CHANNELS = 0;  // Input only
+constexpr long NUM_OUTPUT_CHANNELS = 2;  // Stereo playback
 constexpr ASIOSampleRate SUPPORTED_SAMPLE_RATE = 48000.0;
 
 // Buffer sizes (in samples)
@@ -126,8 +126,8 @@ private:
     
     // ASIO buffers (double-buffered)
     struct ChannelBuffer {
-        std::vector<uint8_t> buffer_a;
-        std::vector<uint8_t> buffer_b;
+        std::vector<int32_t> buffer_a;
+        std::vector<int32_t> buffer_b;
         bool is_input;
         long channel_num;
     };
@@ -138,14 +138,15 @@ private:
     // ASIO callbacks (provided by the host/DAW)
     ASIOCallbacks* callbacks_ = nullptr;
     
+    // Ring buffers and output engine
+    std::shared_ptr<RingBuffer<AudioFrame>> input_ring_buffer_;
+    std::shared_ptr<RingBuffer<AudioFrame>> output_ring_buffer_;
+    
     // Double buffer index (0 or 1)
     long current_buffer_index_ = 0;
     
     // Sample position counter
     std::atomic<int64_t> sample_position_{0};
-    
-    // Ring buffer for receiving audio from USB client
-    std::shared_ptr<RingBuffer> ring_buffer_;
     
     // USB client thread
     std::thread usb_client_thread_;
@@ -154,10 +155,6 @@ private:
     // Audio processing timer thread
     std::thread timer_thread_;
     std::atomic<bool> timer_running_{false};
-    
-    // Temporary buffer for format conversion
-    std::vector<uint8_t> temp_pcm_buffer_;
-    std::vector<int32_t> temp_int32_buffer_;
     
     // Error message
     char error_message_[256] = {};

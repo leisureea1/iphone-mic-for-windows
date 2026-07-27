@@ -13,6 +13,7 @@
 #include "usbmux_client.h"
 #include "protocol.h"
 #include "ring_buffer.h"
+#include "audio_format.h"
 
 #define MINIAUDIO_IMPLEMENTATION
 #include "miniaudio.h"
@@ -45,40 +46,39 @@ std::vector<float> g_Waveform;
 
 // Audio Playback
 std::atomic<bool> g_MonitorAudio = false;
-std::unique_ptr<RingBuffer> g_AudioRingBuffer;
+std::atomic<int> g_AudioChannels = 1;
+std::unique_ptr<RingBuffer<iphone_mic::AudioFrame>> g_AudioRingBuffer;
 ma_device g_AudioDevice;
 
 bool g_IsPrebuffered = false;
-const size_t PREBUFFER_BYTES = 48000 * 2 * sizeof(float) * 2 / 100; // 20ms of audio
+const size_t PREBUFFER_FRAMES = 48000 * 20 / 1000; // 20ms of audio (960 frames)
 
 void data_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma_uint32 frameCount)
 {
     (void)pInput; // Unused
     if (g_MonitorAudio && g_AudioRingBuffer) {
-        size_t bytesToRead = frameCount * 2 * sizeof(float); // Stereo f32
-        
         if (!g_IsPrebuffered) {
-            if (g_AudioRingBuffer->available_read() >= PREBUFFER_BYTES) {
+            if (g_AudioRingBuffer->available_read() >= PREBUFFER_FRAMES) {
                 g_IsPrebuffered = true;
             } else {
-                std::memset(pOutput, 0, bytesToRead);
+                std::memset(pOutput, 0, frameCount * sizeof(iphone_mic::AudioFrame));
                 return;
             }
         }
         
-        size_t bytesRead = g_AudioRingBuffer->read(reinterpret_cast<uint8_t*>(pOutput), bytesToRead);
-        if (bytesRead < bytesToRead) {
+        size_t framesRead = g_AudioRingBuffer->read(reinterpret_cast<iphone_mic::AudioFrame*>(pOutput), frameCount);
+        if (framesRead < frameCount) {
             // Fill remainder with zeros (silence) to avoid audio glitches
-            std::memset(reinterpret_cast<uint8_t*>(pOutput) + bytesRead, 0, bytesToRead - bytesRead);
+            std::memset(reinterpret_cast<iphone_mic::AudioFrame*>(pOutput) + framesRead, 0, (frameCount - framesRead) * sizeof(iphone_mic::AudioFrame));
             g_IsPrebuffered = false; // Enter prebuffering mode due to underrun
         }
     } else {
         // Output silence
-        std::memset(pOutput, 0, frameCount * 2 * sizeof(float));
+        std::memset(pOutput, 0, frameCount * sizeof(iphone_mic::AudioFrame));
         // Keep clearing the buffer so old audio doesn't queue up when disabled
         if (g_AudioRingBuffer) {
-            uint8_t dummy[4096];
-            while (g_AudioRingBuffer->read(dummy, sizeof(dummy)) > 0) {}
+            iphone_mic::AudioFrame dummy[1024];
+            while (g_AudioRingBuffer->read(dummy, 1024) > 0) {}
         }
         g_IsPrebuffered = false;
     }
@@ -113,33 +113,18 @@ void BackgroundUSBThread() {
                     break;
                 }
 
-                size_t pcmSamples = header.payload_size / 2; // 2 bytes per 16-bit sample
-                int16_t* pcm = reinterpret_cast<int16_t*>(payload.data());
+                std::vector<iphone_mic::AudioFrame> audioFrames;
+                iphone_mic::audio_convert::pcm16_to_audio_frames(payload.data(), payload.size(), g_AudioChannels.load(), audioFrames);
                 
                 float maxL = 0.0f;
                 float maxR = 0.0f;
                 
-                std::vector<float> audioFrames;
-                if (g_MonitorAudio) {
-                    audioFrames.reserve(pcmSamples);
-                }
-
                 // Extract Peak and Waveform
                 std::lock_guard<std::mutex> lock(g_WaveformMutex);
-                for (size_t i = 0; i < pcmSamples; i += 2) { // Assuming Stereo
-                    if (i + 1 < pcmSamples) {
-                        float fL = static_cast<float>(pcm[i]) / 32768.0f;
-                        float fR = static_cast<float>(pcm[i+1]) / 32768.0f;
-
-                        maxL = std::max(maxL, std::abs(fL));
-                        maxR = std::max(maxR, std::abs(fR));
-                        g_Waveform.push_back(fL);
-                        
-                        if (g_MonitorAudio) {
-                            audioFrames.push_back(fL);
-                            audioFrames.push_back(fR);
-                        }
-                    }
+                for (const auto& frame : audioFrames) {
+                    maxL = std::max(maxL, std::abs(frame.left));
+                    maxR = std::max(maxR, std::abs(frame.right));
+                    g_Waveform.push_back(frame.left); // Just show left channel for waveform
                 }
                 
                 g_PeakL = maxL;
@@ -147,7 +132,7 @@ void BackgroundUSBThread() {
 
                 // Push to playback buffer if monitoring
                 if (g_MonitorAudio && g_AudioRingBuffer) {
-                    g_AudioRingBuffer->write(reinterpret_cast<const uint8_t*>(audioFrames.data()), audioFrames.size() * sizeof(float));
+                    g_AudioRingBuffer->write(audioFrames.data(), audioFrames.size());
                 }
 
                 if (g_Waveform.size() > 2000) {
@@ -158,6 +143,14 @@ void BackgroundUSBThread() {
                 // Read and discard other payloads
                 std::vector<uint8_t> discard(header.payload_size);
                 recv(sock, reinterpret_cast<char*>(discard.data()), header.payload_size, MSG_WAITALL);
+                
+                if (header.type == static_cast<uint16_t>(PacketType::Config)) {
+                    std::string jsonStr(discard.begin(), discard.end());
+                    auto cfg = iphone_mic::AudioConfig::from_json(jsonStr);
+                    if (cfg && cfg->channels > 0) {
+                        g_AudioChannels = cfg->channels;
+                    }
+                }
             }
         }
         closesocket(sock);
@@ -167,8 +160,8 @@ void BackgroundUSBThread() {
 // Main code
 int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow)
 {
-    // Initialize audio ring buffer (48000 * 2 channels * 4 bytes * 1 second = ~384KB)
-    g_AudioRingBuffer = std::make_unique<RingBuffer>(48000 * 8);
+    // Initialize audio ring buffer (48000 frames * 2 seconds = 96000 frames)
+    g_AudioRingBuffer = std::make_unique<RingBuffer<iphone_mic::AudioFrame>>(96000);
 
     // Initialize miniaudio
     ma_device_config config = ma_device_config_init(ma_device_type_playback);
@@ -309,8 +302,8 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
             g_MonitorAudio = monitor;
             if (monitor) {
                 // Clear the buffer when turning it on to prevent playing old burst
-                uint8_t dummy[4096];
-                while (g_AudioRingBuffer->read(dummy, sizeof(dummy)) > 0) {}
+                AudioFrame dummy[1024];
+                while (g_AudioRingBuffer->read(dummy, 1024) > 0) {}
             }
         }
 

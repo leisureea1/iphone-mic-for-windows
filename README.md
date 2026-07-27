@@ -5,12 +5,12 @@
 ## 系统架构
 
 ```
-iPhone 麦克风 → AVAudioEngine → 24bit PCM → TCP → USB(usbmuxd) → Windows TCP Client (内置 usbmux) → Ring Buffer → ASIO Driver → DAW
+iPhone 麦克风 → AVAudioEngine → 16bit PCM → TCP → USB(usbmuxd) → Windows TCP Client (内置 usbmux) → Ring Buffer → ASIO Driver → DAW
 ```
 
 ## 功能特性
 
-- **48kHz / 24-bit** 专业音频质量
+- **48kHz / 16-bit** 专业音频质量
 - **< 20ms** 端到端延迟
 - **ASIO 驱动**，可被 Studio One / Cubase / Ableton 直接识别
 - **USB 有线传输**，稳定可靠
@@ -79,7 +79,7 @@ iphone_mic_client.exe --save test.raw --duration 5 --verbose
 ```
 
 4. 使用 Audacity 验证: File > Import > Raw Data
-   - Encoding: Signed 24-bit PCM
+   - Encoding: Signed 16-bit PCM
    - Byte order: Little-endian  
    - Channels: 1 (Mono)
    - Sample rate: 48000

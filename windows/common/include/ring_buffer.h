@@ -25,15 +25,16 @@ namespace iphone_mic {
 ///
 /// The buffer stores raw bytes. For audio, this is typically 24-bit PCM
 /// samples. The consumer (ASIO) reads in multiples of the audio frame size.
+template <typename T>
 class RingBuffer {
 public:
-    /// @param capacity  Buffer capacity in bytes. Will be rounded up to
+    /// @param capacity  Buffer capacity in elements (e.g. frames). Will be rounded up to
     ///                  the next power of 2 for efficient masking.
     explicit RingBuffer(size_t capacity) {
         // Round up to next power of 2
         capacity_ = next_power_of_2(capacity);
-        buffer_ = new uint8_t[capacity_];
-        std::memset(buffer_, 0, capacity_);
+        buffer_ = new T[capacity_];
+        std::memset(buffer_, 0, capacity_ * sizeof(T));
         write_pos_.store(0, std::memory_order_relaxed);
         read_pos_.store(0, std::memory_order_relaxed);
     }
@@ -49,15 +50,15 @@ public:
     RingBuffer& operator=(RingBuffer&&) = delete;
     
     /// Write data into the ring buffer (producer side).
-    /// @param data   Pointer to data to write
-    /// @param length Number of bytes to write
-    /// @return Number of bytes actually written (may be less if buffer full)
-    size_t write(const uint8_t* data, size_t length) {
+    /// @param data   Pointer to elements to write
+    /// @param count  Number of elements to write
+    /// @return Number of elements actually written (may be less if buffer full)
+    size_t write(const T* data, size_t count) {
         const size_t w = write_pos_.load(std::memory_order_relaxed);
         const size_t r = read_pos_.load(std::memory_order_acquire);
         
         const size_t available = capacity_ - (w - r);
-        const size_t to_write = std::min(length, available);
+        const size_t to_write = std::min(count, available);
         
         if (to_write == 0) return 0;
         
@@ -65,9 +66,9 @@ public:
         const size_t first_chunk = std::min(to_write, capacity_ - w_masked);
         const size_t second_chunk = to_write - first_chunk;
         
-        std::memcpy(buffer_ + w_masked, data, first_chunk);
+        std::memcpy(buffer_ + w_masked, data, first_chunk * sizeof(T));
         if (second_chunk > 0) {
-            std::memcpy(buffer_, data + first_chunk, second_chunk);
+            std::memcpy(buffer_, data + first_chunk, second_chunk * sizeof(T));
         }
         
         write_pos_.store(w + to_write, std::memory_order_release);
@@ -78,12 +79,12 @@ public:
     /// @param dest   Destination buffer
     /// @param length Number of bytes to read
     /// @return Number of bytes actually read (may be less if not enough data)
-    size_t read(uint8_t* dest, size_t length) {
+    size_t read(T* dest, size_t count) {
         const size_t r = read_pos_.load(std::memory_order_relaxed);
         const size_t w = write_pos_.load(std::memory_order_acquire);
         
         const size_t available = w - r;
-        const size_t to_read = std::min(length, available);
+        const size_t to_read = std::min(count, available);
         
         if (to_read == 0) return 0;
         
@@ -91,9 +92,9 @@ public:
         const size_t first_chunk = std::min(to_read, capacity_ - r_masked);
         const size_t second_chunk = to_read - first_chunk;
         
-        std::memcpy(dest, buffer_ + r_masked, first_chunk);
+        std::memcpy(dest, buffer_ + r_masked, first_chunk * sizeof(T));
         if (second_chunk > 0) {
-            std::memcpy(dest + first_chunk, buffer_, second_chunk);
+            std::memcpy(dest + first_chunk, buffer_, second_chunk * sizeof(T));
         }
         
         read_pos_.store(r + to_read, std::memory_order_release);
@@ -101,12 +102,12 @@ public:
     }
     
     /// Read data without advancing the read position (peek).
-    size_t peek(uint8_t* dest, size_t length) const {
+    size_t peek(T* dest, size_t count) const {
         const size_t r = read_pos_.load(std::memory_order_relaxed);
         const size_t w = write_pos_.load(std::memory_order_acquire);
         
         const size_t available = w - r;
-        const size_t to_read = std::min(length, available);
+        const size_t to_read = std::min(count, available);
         
         if (to_read == 0) return 0;
         
@@ -114,36 +115,36 @@ public:
         const size_t first_chunk = std::min(to_read, capacity_ - r_masked);
         const size_t second_chunk = to_read - first_chunk;
         
-        std::memcpy(dest, buffer_ + r_masked, first_chunk);
+        std::memcpy(dest, buffer_ + r_masked, first_chunk * sizeof(T));
         if (second_chunk > 0) {
-            std::memcpy(dest + first_chunk, buffer_, second_chunk);
+            std::memcpy(dest + first_chunk, buffer_, second_chunk * sizeof(T));
         }
         
         return to_read;
     }
     
-    /// Number of bytes available for reading
+    /// Number of elements available for reading
     size_t available_read() const {
         const size_t w = write_pos_.load(std::memory_order_acquire);
         const size_t r = read_pos_.load(std::memory_order_relaxed);
         return w - r;
     }
     
-    /// Number of bytes available for writing
+    /// Number of elements available for writing
     size_t available_write() const {
         const size_t w = write_pos_.load(std::memory_order_relaxed);
         const size_t r = read_pos_.load(std::memory_order_acquire);
         return capacity_ - (w - r);
     }
     
-    /// Total capacity in bytes
+    /// Total capacity in elements
     size_t capacity() const { return capacity_; }
     
     /// Reset the buffer (NOT thread-safe - call only when no reads/writes)
     void reset() {
         write_pos_.store(0, std::memory_order_relaxed);
         read_pos_.store(0, std::memory_order_relaxed);
-        std::memset(buffer_, 0, capacity_);
+        std::memset(buffer_, 0, capacity_ * sizeof(T));
     }
     
     /// Check if buffer is empty
@@ -171,7 +172,7 @@ private:
         return v;
     }
     
-    uint8_t* buffer_ = nullptr;
+    T* buffer_ = nullptr;
     size_t capacity_ = 0;
     
     // Cache-line aligned to prevent false sharing
