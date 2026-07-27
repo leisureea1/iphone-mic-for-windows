@@ -108,7 +108,7 @@ final class USBServer: ObservableObject {
     /// Send audio PCM data to the connected client.
     /// Called from the audio capture callback.
     func sendAudioData(_ pcmData: Data) {
-        guard activeConnection != nil else { return }
+        guard !activeConnections.isEmpty else { return }
         
         let packet = PacketBuilder.buildAudioPacket(pcmData: pcmData)
         enqueueAndSend(packet)
@@ -221,7 +221,7 @@ final class USBServer: ObservableObject {
     // MARK: - Private: Data Sending
     
     private func enqueueAndSend(_ data: Data) {
-        networkQueue.async { [weak self] in
+        DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
             
             if self.isSending {
@@ -260,7 +260,7 @@ final class USBServer: ObservableObject {
             self.bytesSent += UInt64(data.count)
             
             // Send next pending packet if any
-            self.networkQueue.async {
+            DispatchQueue.main.async {
                 if let next = self.pendingData.first {
                     self.pendingData.removeFirst()
                     self.sendData(next)
@@ -277,8 +277,10 @@ final class USBServer: ObservableObject {
         connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] (data, context, isComplete, error) in
             
             if let data = data, !data.isEmpty {
-                // Parse incoming packets (config changes, etc.)
-                self?.handleReceivedData(data)
+                DispatchQueue.main.async { [weak self] in
+                    // Parse incoming packets (config changes, etc.)
+                    self?.handleReceivedData(data)
+                }
             }
             
             if isComplete {
@@ -287,7 +289,9 @@ final class USBServer: ObservableObject {
             
             if error == nil {
                 // Continue receiving
-                self?.startReceiving(connection)
+                DispatchQueue.main.async { [weak self] in
+                    self?.startReceiving(connection)
+                }
             }
         }
     }
