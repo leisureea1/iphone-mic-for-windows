@@ -224,50 +224,20 @@ final class USBServer: ObservableObject {
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
             
-            if self.isSending {
-                // Queue the data if we're currently sending
-                if self.pendingData.count < self.maxPendingPackets {
-                    self.pendingData.append(data)
-                } else {
-                    // Drop oldest packet to make room
-                    self.pendingData.removeFirst()
-                    self.pendingData.append(data)
-                    DispatchQueue.main.async {
-                        self.packetsDropped += 1
+            guard !self.activeConnections.isEmpty else { return }
+            
+            // Send directly to all connections. Network.framework handles internal buffering.
+            // For real-time audio, if a client is completely stalled, the OS will eventually
+            // drop the connection. This avoids stalling all other fast clients.
+            for connection in self.activeConnections {
+                connection.send(content: data, completion: .contentProcessed { error in
+                    if let error = error {
+                        print("[USBServer] Send error: \(error)")
                     }
-                }
-                return
+                })
             }
             
-            self.isSending = true
-            self.sendData(data)
-        }
-    }
-    
-    private func sendData(_ data: Data) {
-        guard !activeConnections.isEmpty else {
-            isSending = false
-            return
-        }
-        
-        for connection in activeConnections {
-            connection.send(content: data, completion: .contentProcessed { _ in })
-        }
-        
-        // Unblock queue immediately since we broadcasted
-        DispatchQueue.main.async { [weak self] in
-            guard let self = self else { return }
             self.bytesSent += UInt64(data.count)
-            
-            // Send next pending packet if any
-            DispatchQueue.main.async {
-                if let next = self.pendingData.first {
-                    self.pendingData.removeFirst()
-                    self.sendData(next)
-                } else {
-                    self.isSending = false
-                }
-            }
         }
     }
     

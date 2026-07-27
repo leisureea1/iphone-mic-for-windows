@@ -199,6 +199,9 @@ void iPhoneAsioDriver::start_playback_engine() {
     config.pUserData         = this;
     
     // If a specific device was saved, we need to find its ID
+    ma_device_id deviceId;
+    bool foundDevice = false;
+    
     if (!savedDeviceName.empty()) {
         ma_context context;
         if (ma_context_init(NULL, 0, NULL, &context) == MA_SUCCESS) {
@@ -207,17 +210,18 @@ void iPhoneAsioDriver::start_playback_engine() {
             if (ma_context_get_devices(&context, &pPlaybackDevices, &playbackCount, NULL, NULL) == MA_SUCCESS) {
                 for (ma_uint32 i = 0; i < playbackCount; i++) {
                     if (savedDeviceName == pPlaybackDevices[i].name) {
-                        config.playback.pDeviceID = &pPlaybackDevices[i].id;
+                        deviceId = pPlaybackDevices[i].id;
+                        foundDevice = true;
                         break;
                     }
                 }
             }
-            // We can't uninit the context here if the device is going to use it.
-            // Wait, miniaudio device_init creates its own context if context is NULL.
-            // But we passed NULL for context in ma_device_init.
-            // So we can uninit our temporary context used just for enumeration.
             ma_context_uninit(&context);
         }
+    }
+    
+    if (foundDevice) {
+        config.playback.pDeviceID = &deviceId;
     }
     
     if (ma_device_init(NULL, &config, playback_device_) == MA_SUCCESS) {
@@ -797,7 +801,9 @@ void iPhoneAsioDriver::process_audio_buffer() {
         if (cb.is_input) continue; // Only process output channels here
         
         has_output = true;
-        const float* src = reinterpret_cast<const float*>(
+        
+        // Studio One ASIO output is int32_t (ASIOSTInt32LSB), not float!
+        const int32_t* src = reinterpret_cast<const int32_t*>(
             buffer_index == 0 ? cb.buffer_a.data() : cb.buffer_b.data()
         );
         
@@ -805,11 +811,11 @@ void iPhoneAsioDriver::process_audio_buffer() {
         
         if (dst_channel == 0) { // Left
             for (long s = 0; s < buffer_size_; ++s) {
-                output_frames[s].left = src[s];
+                output_frames[s].left = static_cast<float>(src[s]) / 2147483648.0f;
             }
         } else if (dst_channel == 1) { // Right
             for (long s = 0; s < buffer_size_; ++s) {
-                output_frames[s].right = src[s];
+                output_frames[s].right = static_cast<float>(src[s]) / 2147483648.0f;
             }
         }
     }
