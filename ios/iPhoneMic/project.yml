@@ -1,5 +1,6 @@
 name: iPhoneMic
 options:
+  xcodeVersion: "15.0"
   bundleIdPrefix: com.leisureea1
   deploymentTarget:
     iOS: "16.0"
