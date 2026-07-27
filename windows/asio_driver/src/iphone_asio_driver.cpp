@@ -716,23 +716,32 @@ void iPhoneAsioDriver::process_audio_buffer() {
     }
     
     // Read more frames than needed from ring buffer (resampler may consume more or fewer)
-    // We read up to frames_needed + 2 extra to give the interpolator room
+    // We peek up to frames_needed + 2 extra to give the interpolator room
     size_t read_count = frames_needed + 2;
     std::vector<AudioFrame> raw_input(read_count, {0.0f, 0.0f});
     size_t frames_available = 0;
     
     if (input_ring_buffer_) {
-        // Peek first to see how much is available, then read what we need
+        // Peek first to see how much is available, then read what we need without consuming
         frames_available = input_ring_buffer_->available_read();
         if (frames_available > read_count) frames_available = read_count;
-        frames_available = input_ring_buffer_->read(raw_input.data(), frames_available);
+        frames_available = input_ring_buffer_->peek(raw_input.data(), frames_available);
     }
     
     // Run ASRC: produce exactly frames_needed output frames
     std::vector<AudioFrame> resampled(frames_needed, {0.0f, 0.0f});
+    size_t frames_consumed = 0;
     if (frames_available > 0) {
-        resampler_.process(raw_input.data(), frames_available,
-                           resampled.data(), frames_needed);
+        frames_consumed = resampler_.process(raw_input.data(), frames_available,
+                                             resampled.data(), frames_needed);
+    } else {
+        // Output silence if no data
+        std::memset(resampled.data(), 0, frames_needed * sizeof(AudioFrame));
+    }
+    
+    // Now consume EXACTLY the number of frames the resampler used
+    if (input_ring_buffer_ && frames_consumed > 0) {
+        input_ring_buffer_->advance_read(frames_consumed);
     }
     
     // De-interleave into per-channel ASIO buffers (Int32 format)

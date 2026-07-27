@@ -123,6 +123,12 @@ public:
         return to_read;
     }
     
+    /// Advance the read position by count elements (used after peek)
+    void advance_read(size_t count) {
+        const size_t r = read_pos_.load(std::memory_order_relaxed);
+        read_pos_.store(r + count, std::memory_order_release);
+    }
+    
     /// Number of elements available for reading
     size_t available_read() const {
         const size_t w = write_pos_.load(std::memory_order_acquire);
