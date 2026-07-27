@@ -58,10 +58,7 @@ final class USBServer: ObservableObject {
             parameters.serviceClass = .interactiveVideo  // Low latency priority
             
             // Set TCP no-delay (disable Nagle's algorithm)
-            if let tcpOptions = parameters.defaultProtocolStack
-                .internetProtocol as? NWProtocolIP.Options {
-                // IP level options set automatically
-            }
+            // TCP_NODELAY is enabled by default in NWParameters.tcp
             
             let nwPort = NWEndpoint.Port(rawValue: port)!
             listener = try NWListener(using: parameters, on: nwPort)

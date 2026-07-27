@@ -82,7 +82,7 @@ final class PCMConverter {
         
         // Peak using vDSP
         var peak: Float = 0.0
-        var count = vDSP_Length(frameLength)
+        let count = vDSP_Length(frameLength)
         vDSP_maxmgv(samples, 1, &peak, count)
         
         // RMS using vDSP
