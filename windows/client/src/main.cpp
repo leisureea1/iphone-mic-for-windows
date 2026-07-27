@@ -301,11 +301,12 @@ int main(int argc, char* argv[]) {
                                              packet.payload.size());
                             
                             // Display levels
-                            if (opts.verbose && packet.payload.size() >= 3) {
-                                size_t samples = packet.payload.size() / 3;
+                            if (opts.verbose && packet.payload.size() >= 2) {
                                 float peak, rms;
-                                audio_convert::calculate_levels_int24(
-                                    packet.payload.data(), samples, peak, rms);
+                                audio_convert::calculate_levels_int16(
+                                    packet.payload.data(),
+                                    packet.header.payload_size / 2,
+                                    peak, rms);
                                 std::cout << "\r[Level] Peak: " << std::fixed 
                                           << std::setprecision(1) << peak 
                                           << " dBFS  RMS: " << rms << " dBFS  "

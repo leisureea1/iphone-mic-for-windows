@@ -26,88 +26,72 @@ namespace audio_convert {
 // 24-bit PCM ↔ 32-bit Integer Conversion
 // ============================================================================
 
-/// Convert a single 24-bit LE sample (3 bytes) to 32-bit signed integer.
-/// The 24-bit value is sign-extended and shifted left by 8 to fill the 
+/// Convert a single 16-bit LE sample (2 bytes) to 32-bit signed integer.
+/// The 16-bit value is sign-extended and shifted left by 16 to fill the 
 /// full 32-bit range, matching ASIO ASIOSTInt32LSB format.
-inline int32_t int24_to_int32(const uint8_t* src) {
-    // Read 3 bytes as a 24-bit value
-    int32_t val = static_cast<int32_t>(src[0])
-               | (static_cast<int32_t>(src[1]) << 8)
-               | (static_cast<int32_t>(src[2]) << 16);
+inline int32_t int16_to_int32(const uint8_t* src) {
+    // Read 2 bytes as a 16-bit value
+    int16_t val16 = static_cast<int16_t>(src[0] | (src[1] << 8));
     
-    // Sign-extend from 24-bit to 32-bit
-    if (val & 0x800000) {
-        val |= static_cast<int32_t>(0xFF000000);
-    }
-    
-    // Shift left 8 bits to use full 32-bit range (for ASIO Int32)
-    return val << 8;
+    // Shift left 16 bits to use full 32-bit range (for ASIO Int32)
+    return static_cast<int32_t>(val16) << 16;
 }
 
-/// Convert a single 32-bit signed integer to 24-bit LE (3 bytes).
-/// Assumes the significant data is in the upper 24 bits.
-inline void int32_to_int24(int32_t val, uint8_t* dst) {
-    // Shift right 8 to get 24-bit value
-    int32_t v24 = val >> 8;
-    dst[0] = static_cast<uint8_t>(v24 & 0xFF);
-    dst[1] = static_cast<uint8_t>((v24 >> 8) & 0xFF);
-    dst[2] = static_cast<uint8_t>((v24 >> 16) & 0xFF);
+/// Convert a single 32-bit signed integer to 16-bit LE (2 bytes).
+/// Assumes the significant data is in the upper 16 bits (or 32 bits, we just shift down).
+inline void int32_to_int16(int32_t val, uint8_t* dst) {
+    // Shift right 16 to get 16-bit value
+    int16_t v16 = static_cast<int16_t>(val >> 16);
+    dst[0] = static_cast<uint8_t>(v16 & 0xFF);
+    dst[1] = static_cast<uint8_t>((v16 >> 8) & 0xFF);
 }
 
-/// Convert a single 24-bit LE sample to float32 [-1.0, 1.0)
-inline float int24_to_float32(const uint8_t* src) {
-    int32_t val = static_cast<int32_t>(src[0])
-               | (static_cast<int32_t>(src[1]) << 8)
-               | (static_cast<int32_t>(src[2]) << 16);
-    
-    if (val & 0x800000) {
-        val |= static_cast<int32_t>(0xFF000000);
-    }
-    
-    return static_cast<float>(val) / 8388608.0f;  // 2^23
+/// Convert a single 16-bit LE sample to float32 [-1.0, 1.0)
+inline float int16_to_float32(const uint8_t* src) {
+    int16_t val = static_cast<int16_t>(src[0] | (src[1] << 8));
+    return static_cast<float>(val) / 32768.0f;
 }
 
-/// Convert float32 [-1.0, 1.0] to 24-bit LE (3 bytes)
-inline void float32_to_int24(float val, uint8_t* dst) {
+/// Convert float32 [-1.0, 1.0] to 16-bit LE (2 bytes)
+inline void float32_to_int16(float val, uint8_t* dst) {
     // Clamp
     val = std::clamp(val, -1.0f, 1.0f);
-    int32_t i = static_cast<int32_t>(val * 8388607.0f);
+    int16_t i = static_cast<int16_t>(val * 32767.0f);
     dst[0] = static_cast<uint8_t>(i & 0xFF);
     dst[1] = static_cast<uint8_t>((i >> 8) & 0xFF);
-    dst[2] = static_cast<uint8_t>((i >> 16) & 0xFF);
 }
 
 // ============================================================================
 // Bulk Conversion Functions
 // ============================================================================
 
-/// Convert a buffer of 24-bit LE samples to 32-bit signed integers.
-/// @param src      Source buffer of 24-bit samples (3 bytes each)
+/// Convert a buffer of 16-bit LE samples to 32-bit signed integers.
+/// @param src      Source buffer of 16-bit samples (2 bytes each)
 /// @param dst      Destination buffer of int32_t values
 /// @param samples  Number of samples to convert
-inline void convert_int24_to_int32(const uint8_t* src, int32_t* dst, 
+inline void convert_int16_to_int32(const uint8_t* src, int32_t* dst, 
                                     size_t samples) {
     for (size_t i = 0; i < samples; ++i) {
-        dst[i] = int24_to_int32(src + i * 3);
+        dst[i] = int16_to_int32(src + i * 2);
     }
 }
 
-/// Convert a buffer of 24-bit LE samples to float32.
-/// @param src      Source buffer of 24-bit samples (3 bytes each)
+/// Convert a buffer of 16-bit LE samples to float32.
+/// @param src      Source buffer of 16-bit samples (2 bytes each)
 /// @param dst      Destination buffer of float values
 /// @param samples  Number of samples to convert
-inline void convert_int24_to_float32(const uint8_t* src, float* dst,
+inline void convert_int16_to_float32(const uint8_t* src, float* dst,
                                       size_t samples) {
     for (size_t i = 0; i < samples; ++i) {
-        dst[i] = int24_to_float32(src + i * 3);
+        dst[i] = int16_to_float32(src + i * 2);
     }
 }
 
-/// Convert a buffer of int32 samples to 24-bit LE.
-inline void convert_int32_to_int24(const int32_t* src, uint8_t* dst,
+/// Convert a buffer of int32 samples to 16-bit LE.
+inline void convert_int32_to_int16(const int32_t* src, uint8_t* dst,
                                     size_t samples) {
     for (size_t i = 0; i < samples; ++i) {
-        int32_to_int24(src[i], dst + i * 3);
+        int32_to_int16(src[i], dst + i * 2);
     }
 }
 
@@ -115,12 +99,12 @@ inline void convert_int32_to_int24(const int32_t* src, uint8_t* dst,
 // Level Metering
 // ============================================================================
 
-/// Calculate peak and RMS levels from 24-bit PCM data
-/// @param src       Source buffer of 24-bit samples
+/// Calculate peak and RMS levels from 16-bit PCM data
+/// @param src       Source buffer of 16-bit samples
 /// @param samples   Number of samples
 /// @param peak_out  Output: peak level in dBFS
 /// @param rms_out   Output: RMS level in dBFS
-inline void calculate_levels_int24(const uint8_t* src, size_t samples,
+inline void calculate_levels_int16(const uint8_t* src, size_t samples,
                                     float& peak_out, float& rms_out) {
     if (samples == 0) {
         peak_out = -160.0f;
@@ -132,7 +116,7 @@ inline void calculate_levels_int24(const uint8_t* src, size_t samples,
     double sum_sq = 0.0;
     
     for (size_t i = 0; i < samples; ++i) {
-        float s = int24_to_float32(src + i * 3);
+        float s = int16_to_float32(src + i * 2);
         float abs_s = std::abs(s);
         if (abs_s > peak) peak = abs_s;
         sum_sq += static_cast<double>(s) * static_cast<double>(s);

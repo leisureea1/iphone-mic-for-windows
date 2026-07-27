@@ -98,8 +98,8 @@ void BackgroundUSBThread() {
                     break;
                 }
 
-                size_t pcmSamples = header.payload_size / 3; // 3 bytes per 24-bit sample
-                uint8_t* pcm = payload.data();
+                size_t pcmSamples = header.payload_size / 2; // 2 bytes per 16-bit sample
+                int16_t* pcm = reinterpret_cast<int16_t*>(payload.data());
                 
                 float maxL = 0.0f;
                 float maxR = 0.0f;
@@ -113,13 +113,8 @@ void BackgroundUSBThread() {
                 std::lock_guard<std::mutex> lock(g_WaveformMutex);
                 for (size_t i = 0; i < pcmSamples; i += 2) { // Assuming Stereo
                     if (i + 1 < pcmSamples) {
-                        int32_t valL = pcm[i*3] | (pcm[i*3+1] << 8) | (pcm[i*3+2] << 16);
-                        if (valL & 0x800000) valL |= 0xFF000000;
-                        float fL = valL / 8388608.0f;
-
-                        int32_t valR = pcm[(i+1)*3] | (pcm[(i+1)*3+1] << 8) | (pcm[(i+1)*3+2] << 16);
-                        if (valR & 0x800000) valR |= 0xFF000000;
-                        float fR = valR / 8388608.0f;
+                        float fL = static_cast<float>(pcm[i]) / 32768.0f;
+                        float fR = static_cast<float>(pcm[i+1]) / 32768.0f;
 
                         maxL = std::max(maxL, std::abs(fL));
                         maxR = std::max(maxR, std::abs(fR));

@@ -193,12 +193,12 @@ final class AudioCaptureEngine: ObservableObject {
         inputNode.installTap(onBus: 0, bufferSize: bufferSize, format: tapFormat) { 
             [weak self] (buffer, time) in
             
-            // Convert Float32 → 24-bit PCM
+            // Convert Float32 → 16-bit PCM
             let pcmData: Data?
             if channelCount == 2 {
-                pcmData = PCMConverter.monoToStereoInt24(buffer: buffer)
+                pcmData = PCMConverter.monoToStereoInt16(buffer: buffer)
             } else {
-                pcmData = PCMConverter.convertToInt24(
+                pcmData = PCMConverter.convertToInt16(
                     buffer: buffer, 
                     channelCount: channelCount
                 )

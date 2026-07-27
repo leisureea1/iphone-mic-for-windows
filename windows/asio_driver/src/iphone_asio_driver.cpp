@@ -555,10 +555,10 @@ void iPhoneAsioDriver::process_audio_buffer() {
     long buffer_index = current_buffer_index_;
     
     // Calculate how many PCM bytes we need from the ring buffer
-    // Ring buffer contains 24-bit interleaved PCM (3 bytes per sample per channel)
-    // We need buffer_size_ samples × channels × 3 bytes
+    // Ring buffer contains 16-bit interleaved PCM (2 bytes per sample per channel)
+    // We need buffer_size_ samples × channels × 2 bytes
     size_t channels = static_cast<size_t>(NUM_INPUT_CHANNELS);
-    size_t pcm_bytes_needed = static_cast<size_t>(buffer_size_) * 3 * channels;
+    size_t pcm_bytes_needed = static_cast<size_t>(buffer_size_) * 2 * channels;
     
     // Try to read from ring buffer
     size_t bytes_read = ring_buffer_->read(temp_pcm_buffer_.data(), pcm_bytes_needed);
@@ -575,12 +575,12 @@ void iPhoneAsioDriver::process_audio_buffer() {
         }
     }
     
-    // Convert 24-bit interleaved PCM to 32-bit per-channel ASIO buffers
+    // Convert 16-bit interleaved PCM to 32-bit per-channel ASIO buffers
     {
         size_t total_samples = static_cast<size_t>(buffer_size_) * channels;
         
         // First convert all interleaved samples to int32
-        audio_convert::convert_int24_to_int32(temp_pcm_buffer_.data(), 
+        audio_convert::convert_int16_to_int32(temp_pcm_buffer_.data(), 
                                                temp_int32_buffer_.data(), 
                                                total_samples);
         
