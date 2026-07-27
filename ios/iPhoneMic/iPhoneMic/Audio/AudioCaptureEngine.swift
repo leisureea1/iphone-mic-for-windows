@@ -193,8 +193,8 @@ final class AudioCaptureEngine: ObservableObject {
         inputNode.installTap(onBus: 0, bufferSize: bufferSize, format: tapFormat) { 
             [weak self] (buffer, time) in
             
-            // Convert Float32 → 16-bit PCM (Always Stereo to match Windows receiver)
-            let pcmData = PCMConverter.monoToStereoInt16(buffer: buffer)
+            // Convert Float32 → 16-bit PCM (Respects user's channel mode setting)
+            let pcmData = PCMConverter.convertToInt16(buffer: buffer, channelCount: config.channelMode.rawValue)
             
             // Calculate levels
             let levels = PCMConverter.calculateLevels(buffer: buffer)

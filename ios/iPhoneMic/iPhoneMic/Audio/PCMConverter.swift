@@ -28,10 +28,9 @@ final class PCMConverter {
         guard frameLength > 0 else { return nil }
         
         let srcChannels = Int(buffer.format.channelCount)
-        let outChannels = min(channelCount, srcChannels)
         
         // Output: 2 bytes per sample, interleaved
-        let outputSize = frameLength * outChannels * 2
+        let outputSize = frameLength * channelCount * 2
         var output = Data(count: outputSize)
         
         output.withUnsafeMutableBytes { rawPtr in
@@ -42,9 +41,10 @@ final class PCMConverter {
             var writeOffset = 0
             
             for frame in 0..<frameLength {
-                for ch in 0..<outChannels {
-                    // Get float sample [-1.0, 1.0]
-                    let sample = floatData[ch][frame]
+                for ch in 0..<channelCount {
+                    // If output wants more channels than source, duplicate the last available channel (usually channel 0)
+                    let srcCh = min(ch, srcChannels - 1)
+                    let sample = floatData[srcCh][frame]
                     
                     // Clamp and convert to 16-bit signed integer
                     let clamped = max(-1.0, min(1.0, sample))
