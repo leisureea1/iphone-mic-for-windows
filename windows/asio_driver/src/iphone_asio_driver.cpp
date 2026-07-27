@@ -228,7 +228,9 @@ ASIOError iPhoneAsioDriver::getSamplePosition(ASIOSamples* sPos,
                                                 ASIOTimeStamp* tStamp) {
     if (!sPos || !tStamp) return ASE_InvalidParameter;
     
-    *sPos = sample_position_.load();
+    uint64_t pos = sample_position_.load();
+    sPos->hi = static_cast<unsigned long>(pos >> 32);
+    sPos->lo = static_cast<unsigned long>(pos & 0xFFFFFFFF);
     
     // System time in nanoseconds (using QPC)
     LARGE_INTEGER freq, count;
@@ -236,7 +238,9 @@ ASIOError iPhoneAsioDriver::getSamplePosition(ASIOSamples* sPos,
     QueryPerformanceCounter(&count);
     double seconds = static_cast<double>(count.QuadPart) / 
                      static_cast<double>(freq.QuadPart);
-    *tStamp = static_cast<ASIOTimeStamp>(seconds * 1e9);
+    uint64_t sysTimeNs = static_cast<uint64_t>(seconds * 1e9);
+    tStamp->hi = static_cast<unsigned long>(sysTimeNs >> 32);
+    tStamp->lo = static_cast<unsigned long>(sysTimeNs & 0xFFFFFFFF);
     
     return ASE_OK;
 }
@@ -611,17 +615,21 @@ callback:
     // Call host's buffer switch callback
     if (callbacks_->bufferSwitchTimeInfo) {
         ASIOTime time{};
-        time.timeInfo.samplePosition = sample_position_.load();
+        uint64_t pos = sample_position_.load();
+        time.timeInfo.samplePosition.hi = static_cast<unsigned long>(pos >> 32);
+        time.timeInfo.samplePosition.lo = static_cast<unsigned long>(pos & 0xFFFFFFFF);
         time.timeInfo.sampleRate = sample_rate_;
         time.timeInfo.flags = 0x03;  // kSystemTimeValid | kSamplePositionValid
         
         LARGE_INTEGER freq, count;
         QueryPerformanceFrequency(&freq);
         QueryPerformanceCounter(&count);
-        time.timeInfo.systemTime = static_cast<ASIOTimeStamp>(
+        uint64_t sysTimeNs = static_cast<uint64_t>(
             static_cast<double>(count.QuadPart) / 
             static_cast<double>(freq.QuadPart) * 1e9
         );
+        time.timeInfo.systemTime.hi = static_cast<unsigned long>(sysTimeNs >> 32);
+        time.timeInfo.systemTime.lo = static_cast<unsigned long>(sysTimeNs & 0xFFFFFFFF);
         
         callbacks_->bufferSwitchTimeInfo(&time, buffer_index, ASIOTrue);
     } else if (callbacks_->bufferSwitch) {

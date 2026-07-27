@@ -77,6 +77,7 @@ add_library(iphone_asio_driver SHARED
 target_include_directories(iphone_asio_driver PRIVATE
     ${COMMON_INCLUDE_DIR}
     asio_driver/include
+    third_party/ASIOSDK/ASIOSDK/common
 )
 
 target_link_libraries(iphone_asio_driver PRIVATE
@@ -91,6 +92,7 @@ target_compile_definitions(iphone_asio_driver PRIVATE
     WIN32_LEAN_AND_MEAN
     _CRT_SECURE_NO_WARNINGS
     NOMINMAX
+    NATIVE_INT64=1
 )
 
 # Module definition file for DLL exports

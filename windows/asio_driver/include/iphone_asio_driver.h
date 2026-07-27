@@ -12,14 +12,24 @@
 
 #pragma once
 
-#include "asio_sys.h"
+
 #include "ring_buffer.h"
 #include "protocol.h"
 #include "audio_format.h"
 
 #include <memory>
 #include <thread>
+#include <cstdint>
 #include <atomic>
+
+#include <windows.h>
+#include <Unknwn.h>
+
+// Official ASIO SDK
+#include "asiosys.h"
+#include "asio.h"
+#include "iasiodrv.h"
+
 #include <mutex>
 #include <string>
 #include <vector>

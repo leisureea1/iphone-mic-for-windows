@@ -52,7 +52,7 @@ void data_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma_uin
 {
     (void)pInput; // Unused
     if (g_MonitorAudio && g_AudioRingBuffer) {
-        size_t bytesToRead = frameCount * 2 * 3; // Stereo 24-bit (3 bytes per sample)
+        size_t bytesToRead = frameCount * 2 * sizeof(float); // Stereo f32
         size_t bytesRead = g_AudioRingBuffer->read(reinterpret_cast<uint8_t*>(pOutput), bytesToRead);
         if (bytesRead < bytesToRead) {
             // Fill remainder with zeros (silence) to avoid audio glitches
@@ -60,7 +60,7 @@ void data_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma_uin
         }
     } else {
         // Output silence
-        std::memset(pOutput, 0, frameCount * 2 * 3);
+        std::memset(pOutput, 0, frameCount * 2 * sizeof(float));
         // Keep clearing the buffer so old audio doesn't queue up when disabled
         if (g_AudioRingBuffer) {
             uint8_t dummy[4096];
@@ -104,6 +104,11 @@ void BackgroundUSBThread() {
                 float maxL = 0.0f;
                 float maxR = 0.0f;
                 
+                std::vector<float> audioFrames;
+                if (g_MonitorAudio) {
+                    audioFrames.reserve(pcmSamples);
+                }
+
                 // Extract Peak and Waveform
                 std::lock_guard<std::mutex> lock(g_WaveformMutex);
                 for (size_t i = 0; i < pcmSamples; i += 2) { // Assuming Stereo
@@ -119,6 +124,11 @@ void BackgroundUSBThread() {
                         maxL = std::max(maxL, std::abs(fL));
                         maxR = std::max(maxR, std::abs(fR));
                         g_Waveform.push_back(fL);
+                        
+                        if (g_MonitorAudio) {
+                            audioFrames.push_back(fL);
+                            audioFrames.push_back(fR);
+                        }
                     }
                 }
                 
@@ -127,7 +137,7 @@ void BackgroundUSBThread() {
 
                 // Push to playback buffer if monitoring
                 if (g_MonitorAudio && g_AudioRingBuffer) {
-                    g_AudioRingBuffer->write(payload.data(), header.payload_size);
+                    g_AudioRingBuffer->write(reinterpret_cast<const uint8_t*>(audioFrames.data()), audioFrames.size() * sizeof(float));
                 }
 
                 if (g_Waveform.size() > 2000) {
@@ -147,12 +157,12 @@ void BackgroundUSBThread() {
 // Main code
 int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow)
 {
-    // Initialize audio ring buffer (48000 * 2 channels * 2 bytes * 1 second = ~192KB)
-    g_AudioRingBuffer = std::make_unique<RingBuffer>(48000 * 4);
+    // Initialize audio ring buffer (48000 * 2 channels * 4 bytes * 1 second = ~384KB)
+    g_AudioRingBuffer = std::make_unique<RingBuffer>(48000 * 8);
 
     // Initialize miniaudio
     ma_device_config config = ma_device_config_init(ma_device_type_playback);
-    config.playback.format   = ma_format_s24;
+    config.playback.format   = ma_format_f32;
     config.playback.channels = 2;
     config.sampleRate        = 48000;
     config.dataCallback      = data_callback;
