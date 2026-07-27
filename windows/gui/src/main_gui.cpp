@@ -65,7 +65,33 @@ struct OutputDeviceInfo {
 };
 std::vector<OutputDeviceInfo> g_OutputDevices;
 int g_SelectedDeviceIndex = 0;  // 0 = system default
+std::string g_SavedDeviceName = "";
 bool g_NeedDeviceRefresh = true;
+
+// Registry helper for sharing config with ASIO driver
+void SaveOutputDeviceToRegistry(const std::string& deviceName) {
+    HKEY hKey;
+    if (RegCreateKeyExA(HKEY_CURRENT_USER, "Software\\iPhoneMic", 0, NULL, 
+        REG_OPTION_NON_VOLATILE, KEY_WRITE, NULL, &hKey, NULL) == ERROR_SUCCESS) {
+        RegSetValueExA(hKey, "ASIOOutputDevice", 0, REG_SZ, 
+            reinterpret_cast<const BYTE*>(deviceName.c_str()), 
+            static_cast<DWORD>(deviceName.length() + 1));
+        RegCloseKey(hKey);
+    }
+}
+
+void LoadOutputDeviceFromRegistry() {
+    HKEY hKey;
+    if (RegOpenKeyExA(HKEY_CURRENT_USER, "Software\\iPhoneMic", 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+        char buffer[256] = {0};
+        DWORD bufferSize = sizeof(buffer);
+        if (RegQueryValueExA(hKey, "ASIOOutputDevice", NULL, NULL, 
+            reinterpret_cast<LPBYTE>(buffer), &bufferSize) == ERROR_SUCCESS) {
+            g_SavedDeviceName = buffer;
+        }
+        RegCloseKey(hKey);
+    }
+}
 
 void EnumerateOutputDevices() {
     g_OutputDevices.clear();
@@ -91,6 +117,11 @@ void EnumerateOutputDevices() {
             info.name = pPlaybackDevices[i].name;
             info.is_default = pPlaybackDevices[i].isDefault != 0;
             g_OutputDevices.push_back(info);
+            
+            // If this matches our saved device, select it
+            if (!g_SavedDeviceName.empty() && info.name == g_SavedDeviceName) {
+                g_SelectedDeviceIndex = static_cast<int>(g_OutputDevices.size()) - 1;
+            }
         }
     }
     
@@ -106,6 +137,12 @@ void SwitchOutputDevice(int deviceIndex) {
     }
     
     g_SelectedDeviceIndex = deviceIndex;
+    
+    // Save to registry
+    if (deviceIndex >= 0 && deviceIndex < (int)g_OutputDevices.size()) {
+        SaveOutputDeviceToRegistry(g_OutputDevices[deviceIndex].name);
+    }
+    
     g_IsPrebuffered = false;
     
     ma_device_config config = ma_device_config_init(ma_device_type_playback);
@@ -236,9 +273,12 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
     // Initialize audio ring buffer (48000 frames * 2 seconds = 96000 frames)
     g_AudioRingBuffer = std::make_unique<RingBuffer<iphone_mic::AudioFrame>>(96000);
 
+    // Load saved device preference
+    LoadOutputDeviceFromRegistry();
+
     // Enumerate and initialize audio output device
     EnumerateOutputDevices();
-    SwitchOutputDevice(0);  // Start with system default
+    SwitchOutputDevice(g_SelectedDeviceIndex);  // Start with saved or default
 
     // Create application window
     WNDCLASSEXW wc = { sizeof(wc), CS_CLASSDC, WndProc, 0L, 0L, hInstance, nullptr, nullptr, nullptr, nullptr, L"iPhoneMic GUI", nullptr };
@@ -358,7 +398,8 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
         
         ImGui::Spacing();
         ImGui::Separator();
-        ImGui::Text("Audio Monitoring");
+        ImGui::Text("ASIO Output Device Routing");
+        ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "Select where the DAW output should play (requires DAW restart):");
         
         // Output device selector
         if (g_NeedDeviceRefresh) {

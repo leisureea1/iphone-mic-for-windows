@@ -24,6 +24,9 @@
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "winmm.lib")
 
+#define MINIAUDIO_IMPLEMENTATION
+#include "../../third_party/miniaudio/miniaudio.h"
+
 namespace iphone_mic {
 
 
@@ -127,6 +130,9 @@ ASIOError iPhoneAsioDriver::start() {
     // Reset ASRC state
     resampler_.reset();
     
+    // Start output playback engine
+    start_playback_engine();
+    
     // Start the timer that drives buffer callbacks
     start_timer();
     
@@ -139,8 +145,95 @@ ASIOError iPhoneAsioDriver::stop() {
     
     running_ = false;
     stop_timer();
+    stop_playback_engine();
     
     return ASE_OK;
+}
+
+// ============================================================================
+// Output Playback Engine (miniaudio)
+// ============================================================================
+
+static void asio_playback_data_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma_uint32 frameCount) {
+    (void)pInput;
+    iPhoneAsioDriver* driver = static_cast<iPhoneAsioDriver*>(pDevice->pUserData);
+    if (!driver) return;
+    
+    size_t framesRead = driver->read_output_buffer(reinterpret_cast<AudioFrame*>(pOutput), frameCount);
+    if (framesRead < frameCount) {
+        // Fill remainder with zeros to avoid audio glitches
+        std::memset(reinterpret_cast<AudioFrame*>(pOutput) + framesRead, 0, (frameCount - framesRead) * sizeof(AudioFrame));
+    }
+}
+
+size_t iPhoneAsioDriver::read_output_buffer(AudioFrame* out, size_t frames) {
+    if (output_ring_buffer_) {
+        return output_ring_buffer_->read(out, frames);
+    }
+    return 0;
+}
+
+void iPhoneAsioDriver::start_playback_engine() {
+    if (playback_device_) return;
+    
+    // Read the saved output device from the registry
+    std::string savedDeviceName;
+    HKEY hKey;
+    if (RegOpenKeyExA(HKEY_CURRENT_USER, "Software\\iPhoneMic", 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+        char buffer[256] = {0};
+        DWORD bufferSize = sizeof(buffer);
+        if (RegQueryValueExA(hKey, "ASIOOutputDevice", NULL, NULL, 
+            reinterpret_cast<LPBYTE>(buffer), &bufferSize) == ERROR_SUCCESS) {
+            savedDeviceName = buffer;
+        }
+        RegCloseKey(hKey);
+    }
+    
+    playback_device_ = new ma_device;
+    
+    ma_device_config config = ma_device_config_init(ma_device_type_playback);
+    config.playback.format   = ma_format_f32;
+    config.playback.channels = 2;
+    config.sampleRate        = 48000;
+    config.dataCallback      = asio_playback_data_callback;
+    config.pUserData         = this;
+    
+    // If a specific device was saved, we need to find its ID
+    if (!savedDeviceName.empty()) {
+        ma_context context;
+        if (ma_context_init(NULL, 0, NULL, &context) == MA_SUCCESS) {
+            ma_device_info* pPlaybackDevices;
+            ma_uint32 playbackCount;
+            if (ma_context_get_devices(&context, &pPlaybackDevices, &playbackCount, NULL, NULL) == MA_SUCCESS) {
+                for (ma_uint32 i = 0; i < playbackCount; i++) {
+                    if (savedDeviceName == pPlaybackDevices[i].name) {
+                        config.playback.pDeviceID = &pPlaybackDevices[i].id;
+                        break;
+                    }
+                }
+            }
+            // We can't uninit the context here if the device is going to use it.
+            // Wait, miniaudio device_init creates its own context if context is NULL.
+            // But we passed NULL for context in ma_device_init.
+            // So we can uninit our temporary context used just for enumeration.
+            ma_context_uninit(&context);
+        }
+    }
+    
+    if (ma_device_init(NULL, &config, playback_device_) == MA_SUCCESS) {
+        ma_device_start(playback_device_);
+    } else {
+        delete playback_device_;
+        playback_device_ = nullptr;
+    }
+}
+
+void iPhoneAsioDriver::stop_playback_engine() {
+    if (playback_device_) {
+        ma_device_uninit(playback_device_);
+        delete playback_device_;
+        playback_device_ = nullptr;
+    }
 }
 
 // ============================================================================

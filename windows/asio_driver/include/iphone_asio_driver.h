@@ -17,6 +17,9 @@
 #include "protocol.h"
 #include "audio_format.h"
 
+// Forward declare ma_device to avoid including full miniaudio.h in the header
+typedef struct ma_device ma_device;
+
 #include <memory>
 #include <thread>
 #include <cstdint>
@@ -111,6 +114,9 @@ public:
     ASIOError future(long selector, void* opt) override;
     ASIOError outputReady() override;
     
+    // Output Playback access
+    size_t read_output_buffer(AudioFrame* out, size_t frames);
+    
 private:
     // COM reference count
     long ref_count_ = 1;
@@ -162,6 +168,9 @@ private:
     // ASRC: Adaptive resampler for clock drift compensation
     AdaptiveResampler resampler_;
     
+    // Output Playback Device (miniaudio)
+    ma_device* playback_device_ = nullptr;
+    
     // Private methods
     void start_usb_client();
     void stop_usb_client();
@@ -175,6 +184,10 @@ private:
     void fill_silence(long buffer_index);
     
     bool is_valid_buffer_size(long size) const;
+    
+    // Output Playback helpers
+    void start_playback_engine();
+    void stop_playback_engine();
 };
 
 } // namespace iphone_mic
