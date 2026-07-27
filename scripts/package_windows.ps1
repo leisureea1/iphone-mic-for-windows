@@ -21,7 +21,7 @@ if (-not (Test-Path $BuildBin)) {
 
 # Copy Binaries
 Write-Host "Copying binaries..."
-Copy-Item "$BuildBin\iphone_mic_client.exe" -Destination $DistDir
+Copy-Item "$BuildBin\iphone_mic_gui.exe" -Destination "$DistDir\iPhoneMic Control Center.exe"
 Copy-Item "$BuildBin\iphone_asio_driver.dll" -Destination $DistDir
 
 # Copy Scripts
@@ -45,14 +45,16 @@ How to use:
 4. Open your DAW (Studio One, Cubase, Ableton, etc.) 
    and select "iPhone USB Microphone ASIO" in Audio Settings.
 
-To test the connection without a DAW:
-- Run iphone_mic_client.exe
-- Or use command prompt: iphone_mic_client.exe --verbose
+To manage the driver or test the connection:
+- Open "iPhoneMic Control Center.exe"
 
-To uninstall:
-- Right-click "unregister_driver.bat" -> Run as administrator
+From the Control Center, you can:
+- See the connection status in real-time
+- View your microphone's live waveform & VU meters
+- Click "Install / Register ASIO Driver" with a single click
 
-Enjoy zero-latency recording from your iPhone!
+After registering, open your DAW (Studio One, Cubase, Ableton, etc.) 
+and select "iPhone USB Microphone ASIO" in Audio Settings.
 "@ | Out-File -FilePath $ReadmePath -Encoding UTF8
 
 Write-Host "Zipping package..."
