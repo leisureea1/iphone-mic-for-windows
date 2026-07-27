@@ -16,6 +16,7 @@ target_include_directories(iphone_mic_gui PRIVATE
     ${COMMON_INCLUDE_DIR}
     ${IMGUI_DIR}
     ${IMGUI_DIR}/backends
+    ${CMAKE_SOURCE_DIR}/third_party/miniaudio
 )
 
 target_link_libraries(iphone_mic_gui PRIVATE

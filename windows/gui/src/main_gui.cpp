@@ -14,6 +14,9 @@
 #include "protocol.h"
 #include "ring_buffer.h"
 
+#define MINIAUDIO_IMPLEMENTATION
+#include "miniaudio.h"
+
 using namespace iphone_mic;
 
 // Forward declare message handler from imgui_impl_win32.cpp
@@ -39,6 +42,32 @@ std::atomic<float> g_PeakL = 0.0f;
 std::atomic<float> g_PeakR = 0.0f;
 std::mutex g_WaveformMutex;
 std::vector<float> g_Waveform;
+
+// Audio Playback
+std::atomic<bool> g_MonitorAudio = false;
+std::unique_ptr<RingBuffer> g_AudioRingBuffer;
+ma_device g_AudioDevice;
+
+void data_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma_uint32 frameCount)
+{
+    (void)pInput; // Unused
+    if (g_MonitorAudio && g_AudioRingBuffer) {
+        size_t bytesToRead = frameCount * 2 * sizeof(int16_t); // Stereo 16-bit
+        size_t bytesRead = g_AudioRingBuffer->read(reinterpret_cast<uint8_t*>(pOutput), bytesToRead);
+        if (bytesRead < bytesToRead) {
+            // Fill remainder with zeros (silence) to avoid audio glitches
+            std::memset(reinterpret_cast<uint8_t*>(pOutput) + bytesRead, 0, bytesToRead - bytesRead);
+        }
+    } else {
+        // Output silence
+        std::memset(pOutput, 0, frameCount * 2 * sizeof(int16_t));
+        // Keep clearing the buffer so old audio doesn't queue up when disabled
+        if (g_AudioRingBuffer) {
+            uint8_t dummy[4096];
+            while (g_AudioRingBuffer->read(dummy, sizeof(dummy)) > 0) {}
+        }
+    }
+}
 
 void BackgroundUSBThread() {
     while (g_AppRunning) {
@@ -90,6 +119,11 @@ void BackgroundUSBThread() {
                 g_PeakL = maxL;
                 g_PeakR = maxR;
 
+                // Push to playback buffer if monitoring
+                if (g_MonitorAudio && g_AudioRingBuffer) {
+                    g_AudioRingBuffer->write(payload.data(), header.payload_size);
+                }
+
                 if (g_Waveform.size() > 2000) {
                     size_t to_remove = g_Waveform.size() - 2000;
                     g_Waveform.erase(g_Waveform.begin(), g_Waveform.begin() + to_remove);
@@ -107,6 +141,23 @@ void BackgroundUSBThread() {
 // Main code
 int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow)
 {
+    // Initialize audio ring buffer (48000 * 2 channels * 2 bytes * 1 second = ~192KB)
+    g_AudioRingBuffer = std::make_unique<RingBuffer>(48000 * 4);
+
+    // Initialize miniaudio
+    ma_device_config config = ma_device_config_init(ma_device_type_playback);
+    config.playback.format   = ma_format_s16;
+    config.playback.channels = 2;
+    config.sampleRate        = 48000;
+    config.dataCallback      = data_callback;
+    config.pUserData         = nullptr;
+
+    if (ma_device_init(NULL, &config, &g_AudioDevice) != MA_SUCCESS) {
+        // Failed to initialize audio device
+    } else {
+        ma_device_start(&g_AudioDevice);
+    }
+
     // Create application window
     WNDCLASSEXW wc = { sizeof(wc), CS_CLASSDC, WndProc, 0L, 0L, hInstance, nullptr, nullptr, nullptr, nullptr, L"iPhoneMic GUI", nullptr };
     ::RegisterClassExW(&wc);
@@ -222,6 +273,20 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
         if (ImGui::Button("Uninstall ASIO Driver", ImVec2(250, 40))) {
             ShellExecuteA(NULL, "runas", "unregister_driver.bat", NULL, NULL, SW_SHOWNORMAL);
         }
+        
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Text("Audio Monitoring");
+        
+        bool monitor = g_MonitorAudio;
+        if (ImGui::Checkbox("Monitor Audio (Listen to iPhone Microphone)", &monitor)) {
+            g_MonitorAudio = monitor;
+            if (monitor) {
+                // Clear the buffer when turning it on to prevent playing old burst
+                uint8_t dummy[4096];
+                while (g_AudioRingBuffer->read(dummy, sizeof(dummy)) > 0) {}
+            }
+        }
 
         ImGui::End();
         // -------------------------------------------------------------
@@ -238,6 +303,10 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
 
     g_AppRunning = false;
     usbThread.join();
+
+    // Cleanup audio
+    ma_device_uninit(&g_AudioDevice);
+    g_AudioRingBuffer.reset();
 
     // Cleanup
     ImGui_ImplDX11_Shutdown();
