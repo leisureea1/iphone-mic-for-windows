@@ -20,6 +20,8 @@
 #include <iostream>
 #include <algorithm>
 #include <timeapi.h>
+#include <shellapi.h>
+#pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "winmm.lib")
 
 namespace iphone_mic {
@@ -121,6 +123,9 @@ ASIOError iPhoneAsioDriver::start() {
     // Reset sample position
     sample_position_.store(0);
     current_buffer_index_ = 0;
+    
+    // Reset ASRC state
+    resampler_.reset();
     
     // Start the timer that drives buffer callbacks
     start_timer();
@@ -313,18 +318,14 @@ ASIOError iPhoneAsioDriver::createBuffers(ASIOBufferInfo* bufferInfos,
     num_active_channels_ = numChannels;
     host_buffer_infos_ = bufferInfos;
     
-    // Initialize IPC and output engine if needed
-    // We will do this in the next steps, for now just clear old buffers
-    
     // Allocate channel buffers (Int32 format, double-buffered)
-    size_t buffer_bytes = static_cast<size_t>(bufferSize) * sizeof(int32_t);
-    
+    // Each buffer holds bufferSize samples of int32_t
     channel_buffers_.resize(numChannels);
     
     for (long i = 0; i < numChannels; ++i) {
         auto& cb = channel_buffers_[i];
-        cb.buffer_a.resize(buffer_bytes, 0);
-        cb.buffer_b.resize(buffer_bytes, 0);
+        cb.buffer_a.resize(static_cast<size_t>(bufferSize), 0);
+        cb.buffer_b.resize(static_cast<size_t>(bufferSize), 0);
         cb.is_input = bufferInfos[i].isInput != 0;
         cb.channel_num = bufferInfos[i].channelNum;
         
@@ -353,19 +354,52 @@ ASIOError iPhoneAsioDriver::disposeBuffers() {
 // IASIO: Control Panel & Future
 // ============================================================================
 
+// Static helper to resolve our own DLL path
+static const char* get_self_address() {
+    return reinterpret_cast<const char*>(&get_self_address);
+}
+
 ASIOError iPhoneAsioDriver::controlPanel() {
-    // Show a simple message box with driver info
+    // Try to launch the GUI control panel application
+    // It should be in the same directory as the driver DLL
+    
+    char dll_path[MAX_PATH] = {};
+    HMODULE hModule = nullptr;
+    GetModuleHandleExA(
+        GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+        get_self_address(),
+        &hModule);
+    
+    if (hModule) {
+        GetModuleFileNameA(hModule, dll_path, MAX_PATH);
+        // Replace DLL filename with GUI exe
+        char* last_slash = strrchr(dll_path, '\\');
+        if (last_slash) {
+            *(last_slash + 1) = '\0';
+            strcat_s(dll_path, "iphone_mic_gui.exe");
+            
+            // Try to launch the GUI
+            HINSTANCE result = ShellExecuteA(
+                sys_handle_, "open", dll_path, nullptr, nullptr, SW_SHOWNORMAL);
+            
+            if (reinterpret_cast<intptr_t>(result) > 32) {
+                return ASE_OK;  // Successfully launched
+            }
+        }
+    }
+    
+    // Fallback: show info dialog
     if (sys_handle_) {
         MessageBoxA(sys_handle_, 
             "iPhone USB Microphone ASIO v1.0\n\n"
             "1. Connect iPhone via USB\n"
             "2. Start iPhoneMic app on iPhone\n"
-            "3. Run: iproxy 8730 8730\n"
-            "4. Select this driver in your DAW\n\n"
+            "3. Audio streams automatically via USB\n\n"
             "Settings:\n"
             "  Sample Rate: 48000 Hz\n"
-            "  Bit Depth: 24-bit\n"
-            "  Buffer: 64 / 128 / 256 / 512 samples",
+            "  Format: 32-bit Integer\n"
+            "  Buffer: 64 / 128 / 256 / 512 samples\n"
+            "  ASRC: Enabled (adaptive clock drift compensation)",
             DRIVER_NAME,
             MB_OK | MB_ICONINFORMATION);
     }
@@ -575,18 +609,36 @@ void iPhoneAsioDriver::process_audio_buffer() {
     size_t frames_needed = static_cast<size_t>(buffer_size_);
     
     // ==========================================
-    // 1. Process INPUT (iPhone -> DAW)
+    // 1. Process INPUT (iPhone -> DAW) with ASRC
     // ==========================================
-    std::vector<AudioFrame> input_frames(frames_needed, {0.0f, 0.0f});
     
+    // Update ASRC ratio based on ring buffer fill level
     if (input_ring_buffer_) {
-        size_t frames_read = input_ring_buffer_->read(input_frames.data(), frames_needed);
-        if (frames_read < frames_needed) {
-            // Not enough data - the vector is already zero-initialized for the remainder
-        }
+        double fill = input_ring_buffer_->fill_ratio();
+        resampler_.update_ratio(fill, 0.5);
     }
     
-    // De-interleave into per-channel ASIO buffers
+    // Read more frames than needed from ring buffer (resampler may consume more or fewer)
+    // We read up to frames_needed + 2 extra to give the interpolator room
+    size_t read_count = frames_needed + 2;
+    std::vector<AudioFrame> raw_input(read_count, {0.0f, 0.0f});
+    size_t frames_available = 0;
+    
+    if (input_ring_buffer_) {
+        // Peek first to see how much is available, then read what we need
+        frames_available = input_ring_buffer_->available_read();
+        if (frames_available > read_count) frames_available = read_count;
+        frames_available = input_ring_buffer_->read(raw_input.data(), frames_available);
+    }
+    
+    // Run ASRC: produce exactly frames_needed output frames
+    std::vector<AudioFrame> resampled(frames_needed, {0.0f, 0.0f});
+    if (frames_available > 0) {
+        resampler_.process(raw_input.data(), frames_available,
+                           resampled.data(), frames_needed);
+    }
+    
+    // De-interleave into per-channel ASIO buffers (Int32 format)
     for (long ch_idx = 0; ch_idx < num_active_channels_; ++ch_idx) {
         auto& cb = channel_buffers_[ch_idx];
         if (!cb.is_input) continue; // Only process input channels here
@@ -599,11 +651,11 @@ void iPhoneAsioDriver::process_audio_buffer() {
         
         if (src_channel == 0) { // Left
             for (long s = 0; s < buffer_size_; ++s) {
-                dst[s] = static_cast<int32_t>(input_frames[s].left * 2147483520.0f);
+                dst[s] = static_cast<int32_t>(resampled[s].left * 2147483520.0f);
             }
         } else if (src_channel == 1) { // Right
             for (long s = 0; s < buffer_size_; ++s) {
-                dst[s] = static_cast<int32_t>(input_frames[s].right * 2147483520.0f);
+                dst[s] = static_cast<int32_t>(resampled[s].right * 2147483520.0f);
             }
         } else {
             std::memset(dst, 0, frames_needed * sizeof(int32_t));
@@ -682,7 +734,7 @@ void iPhoneAsioDriver::fill_silence(long buffer_index) {
     for (long ch = 0; ch < num_active_channels_; ++ch) {
         auto& cb = channel_buffers_[ch];
         void* buf = (buffer_index == 0) ? cb.buffer_a.data() : cb.buffer_b.data();
-        std::memset(buf, 0, static_cast<size_t>(buffer_size_) * sizeof(float));
+        std::memset(buf, 0, static_cast<size_t>(buffer_size_) * sizeof(int32_t));
     }
 }
 

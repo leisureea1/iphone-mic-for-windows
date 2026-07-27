@@ -149,4 +149,132 @@ inline void calculate_levels_int16(const uint8_t* src, size_t samples,
 }
 
 } // namespace audio_convert
+
+// ============================================================================
+// Adaptive Linear Resampler for Clock Drift Compensation (ASRC)
+// ============================================================================
+//
+// iPhone ADC clock and Windows DAC clock drift by ~0.2 samples/sec.
+// Over hours this causes ring buffer overflow/starvation and audible glitches.
+//
+// This resampler uses linear interpolation with an adaptive ratio that tracks
+// the ring buffer fill level. When the buffer starts filling up (iPhone faster),
+// ratio > 1.0 consumes more input. When depleting (iPhone slower), ratio < 1.0.
+//
+// The adjustment is extremely gentle (max ±20 ppm) so it's inaudible.
+
+class AdaptiveResampler {
+public:
+    AdaptiveResampler() = default;
+    
+    /// Reset resampler state (call when stream restarts)
+    void reset() {
+        phase_ = 0.0;
+        prev_frame_ = {0.0f, 0.0f};
+        ratio_ = 1.0;
+        ratio_smoothed_ = 1.0;
+    }
+    
+    /// Update the resample ratio based on ring buffer fill level.
+    /// Call this once per ASIO callback period.
+    ///
+    /// @param fill_ratio  Current ring buffer fill level (0.0 = empty, 1.0 = full)
+    /// @param target      Target fill ratio (typically 0.5)
+    void update_ratio(double fill_ratio, double target = 0.5) {
+        // Error: positive means buffer is overfull (iPhone faster)
+        double error = fill_ratio - target;
+        
+        // Proportional control with very gentle gain
+        // Max correction: ±20 ppm (±0.00002)
+        // This means at most 0.96 samples/sec drift correction at 48kHz
+        constexpr double kP = 0.00004;  // proportional gain
+        constexpr double kMaxCorrection = 0.00002;  // ±20 ppm
+        
+        double correction = error * kP;
+        correction = (correction > kMaxCorrection) ? kMaxCorrection :
+                     (correction < -kMaxCorrection) ? -kMaxCorrection : correction;
+        
+        ratio_ = 1.0 + correction;
+        
+        // Smooth the ratio to avoid sudden jumps
+        constexpr double kSmoothing = 0.001;  // very slow smoothing
+        ratio_smoothed_ += (ratio_ - ratio_smoothed_) * kSmoothing;
+    }
+    
+    /// Resample input frames to output frames using linear interpolation.
+    /// The number of output frames is fixed (= ASIO buffer size).
+    /// The number of input frames consumed varies based on the current ratio.
+    ///
+    /// @param input        Input audio frames
+    /// @param input_count  Number of available input frames
+    /// @param output       Output buffer (pre-allocated)
+    /// @param output_count Number of output frames to produce
+    /// @return Number of input frames actually consumed
+    size_t process(const AudioFrame* input, size_t input_count,
+                   AudioFrame* output, size_t output_count) {
+        size_t in_idx = 0;
+        
+        for (size_t out = 0; out < output_count; ++out) {
+            // Integer and fractional parts of the current phase
+            size_t idx0 = static_cast<size_t>(phase_);
+            double frac = phase_ - static_cast<double>(idx0);
+            
+            // Adjust idx0 relative to current input position
+            size_t local_idx = idx0 - consumed_total_;
+            
+            if (local_idx + 1 < input_count) {
+                // Normal case: interpolate between two input samples
+                float frac_f = static_cast<float>(frac);
+                output[out].left  = input[local_idx].left  * (1.0f - frac_f) + input[local_idx + 1].left  * frac_f;
+                output[out].right = input[local_idx].right * (1.0f - frac_f) + input[local_idx + 1].right * frac_f;
+            } else if (local_idx < input_count) {
+                // Edge case: use last sample and previous frame
+                float frac_f = static_cast<float>(frac);
+                output[out].left  = prev_frame_.left  * (1.0f - frac_f) + input[local_idx].left  * frac_f;
+                output[out].right = prev_frame_.right * (1.0f - frac_f) + input[local_idx].right * frac_f;
+            } else {
+                // Ran out of input - output silence for remaining
+                output[out] = {0.0f, 0.0f};
+            }
+            
+            phase_ += ratio_smoothed_;
+        }
+        
+        // Calculate how many input frames were consumed
+        size_t new_consumed = static_cast<size_t>(phase_);
+        size_t frames_consumed = new_consumed - consumed_total_;
+        
+        // Clamp to available input
+        if (frames_consumed > input_count) {
+            frames_consumed = input_count;
+        }
+        
+        // Save last frame for next call's interpolation
+        if (input_count > 0) {
+            prev_frame_ = input[input_count - 1];
+        }
+        
+        // Reset phase to avoid precision loss over time
+        consumed_total_ += frames_consumed;
+        
+        // Periodically reset to prevent floating point drift
+        if (consumed_total_ > 1000000) {
+            phase_ -= static_cast<double>(consumed_total_);
+            consumed_total_ = 0;
+        }
+        
+        return frames_consumed;
+    }
+    
+    /// Get current smoothed ratio (for diagnostics)
+    double current_ratio() const { return ratio_smoothed_; }
+
+private:
+    double phase_ = 0.0;           // Current fractional read position
+    double ratio_ = 1.0;           // Target resample ratio
+    double ratio_smoothed_ = 1.0;  // Smoothed ratio (actually used)
+    size_t consumed_total_ = 0;    // Total input frames consumed (for phase tracking)
+    AudioFrame prev_frame_ = {0.0f, 0.0f};  // Last frame from previous call
+};
+
 } // namespace iphone_mic

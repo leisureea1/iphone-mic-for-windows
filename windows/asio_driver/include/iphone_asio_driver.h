@@ -159,6 +159,9 @@ private:
     // Error message
     char error_message_[256] = {};
     
+    // ASRC: Adaptive resampler for clock drift compensation
+    AdaptiveResampler resampler_;
+    
     // Private methods
     void start_usb_client();
     void stop_usb_client();
