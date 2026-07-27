@@ -48,15 +48,29 @@ std::atomic<bool> g_MonitorAudio = false;
 std::unique_ptr<RingBuffer> g_AudioRingBuffer;
 ma_device g_AudioDevice;
 
+bool g_IsPrebuffered = false;
+const size_t PREBUFFER_BYTES = 48000 * 2 * sizeof(float) * 2 / 100; // 20ms of audio
+
 void data_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma_uint32 frameCount)
 {
     (void)pInput; // Unused
     if (g_MonitorAudio && g_AudioRingBuffer) {
         size_t bytesToRead = frameCount * 2 * sizeof(float); // Stereo f32
+        
+        if (!g_IsPrebuffered) {
+            if (g_AudioRingBuffer->available_read() >= PREBUFFER_BYTES) {
+                g_IsPrebuffered = true;
+            } else {
+                std::memset(pOutput, 0, bytesToRead);
+                return;
+            }
+        }
+        
         size_t bytesRead = g_AudioRingBuffer->read(reinterpret_cast<uint8_t*>(pOutput), bytesToRead);
         if (bytesRead < bytesToRead) {
             // Fill remainder with zeros (silence) to avoid audio glitches
             std::memset(reinterpret_cast<uint8_t*>(pOutput) + bytesRead, 0, bytesToRead - bytesRead);
+            g_IsPrebuffered = false; // Enter prebuffering mode due to underrun
         }
     } else {
         // Output silence
@@ -66,6 +80,7 @@ void data_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma_uin
             uint8_t dummy[4096];
             while (g_AudioRingBuffer->read(dummy, sizeof(dummy)) > 0) {}
         }
+        g_IsPrebuffered = false;
     }
 }
 
