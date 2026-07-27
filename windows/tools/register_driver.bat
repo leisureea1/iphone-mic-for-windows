@@ -21,7 +21,11 @@ if %errorlevel% neq 0 (
     exit /b 1
 )
 
-set DLL_PATH=%~dp0\..\windows\build\bin\Release\iphone_asio_driver.dll
+set DLL_PATH=%~dp0iphone_asio_driver.dll
+if not exist "%DLL_PATH%" (
+    REM Try relative to development tools directory
+    set DLL_PATH=%~dp0..\build\bin\Release\iphone_asio_driver.dll
+)
 
 if not exist "%DLL_PATH%" (
     echo ERROR: ASIO driver DLL not found at:
