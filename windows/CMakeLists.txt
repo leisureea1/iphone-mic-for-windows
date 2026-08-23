@@ -123,6 +123,12 @@ add_executable(audio_format_test
 )
 target_include_directories(audio_format_test PRIVATE ${COMMON_INCLUDE_DIR})
 
+# DSP Pipeline Test
+add_executable(dsp_test
+    tests/dsp_test.cpp
+)
+target_include_directories(dsp_test PRIVATE ${COMMON_INCLUDE_DIR})
+
 # ============================================================================
 # GUI Application
 # ============================================================================

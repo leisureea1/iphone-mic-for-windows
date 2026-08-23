@@ -172,10 +172,20 @@ private:
     // DSP Pipeline (HPF, Noise Gate, Gain, AGC Limiter)
     AudioDSPPipeline dsp_;
     std::atomic<uint64_t> dropped_frames_{0};
+    int check_dsp_counter_ = 0;
     
     // Output Playback Device (miniaudio)
     ma_device* playback_device_ = nullptr;
     
+    // Pre-allocated realtime work buffers (zero heap allocation in callback)
+    std::vector<AudioFrame> work_raw_input_;
+    std::vector<AudioFrame> work_resampled_;
+    std::vector<AudioFrame> work_output_frames_;
+    std::vector<AudioFrame> usb_audio_frames_;
+    
+    // Latency compensation offset (samples)
+    long record_offset_samples_ = 0;
+
     // Private methods
     void start_usb_client();
     void stop_usb_client();
@@ -188,6 +198,7 @@ private:
     void process_audio_buffer();
     void fill_silence(long buffer_index);
     void load_dsp_settings_from_registry();
+    void update_latency_offset_from_registry();
     
     bool is_valid_buffer_size(long size) const;
     

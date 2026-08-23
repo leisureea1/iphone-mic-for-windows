@@ -76,7 +76,7 @@ static_assert(sizeof(PacketHeader) == PacketHeader::SIZE,
 // Audio configuration (matches JSON payload in config packets)
 struct AudioConfig {
     int sample_rate  = 48000;
-    int bit_depth    = 24;
+    int bit_depth    = 16;
     int channels     = 1;
     int buffer_size  = 256;
     

@@ -12,6 +12,11 @@
 #include <cstring>
 #include <algorithm>
 #include <cassert>
+#include <cstdlib>
+
+#if defined(_WIN32) || defined(_WIN64)
+#include <malloc.h>
+#endif
 
 namespace iphone_mic {
 
@@ -19,12 +24,11 @@ namespace iphone_mic {
 /// 
 /// Thread safety guarantee:
 ///   - Exactly ONE thread may call write()
-///   - Exactly ONE thread may call read()
+///   - Exactly ONE thread may call read(), peek(), advance_read(), drain_to_latest()
 ///   - No locks are used; relies on atomic operations with appropriate
 ///     memory ordering for safe cross-thread communication.
 ///
-/// The buffer stores raw bytes. For audio, this is typically 24-bit PCM
-/// samples. The consumer (ASIO) reads in multiples of the audio frame size.
+/// The buffer stores audio frames or samples.
 template <typename T>
 class RingBuffer {
 public:
@@ -33,14 +37,24 @@ public:
     explicit RingBuffer(size_t capacity) {
         // Round up to next power of 2
         capacity_ = next_power_of_2(capacity);
-        buffer_ = new T[capacity_];
-        std::memset(buffer_, 0, capacity_ * sizeof(T));
+#if defined(_WIN32) || defined(_WIN64)
+        buffer_ = static_cast<T*>(_aligned_malloc(capacity_ * sizeof(T), 64));
+#else
+        buffer_ = static_cast<T*>(std::aligned_alloc(64, capacity_ * sizeof(T)));
+#endif
+        if (buffer_) {
+            std::memset(buffer_, 0, capacity_ * sizeof(T));
+        }
         write_pos_.store(0, std::memory_order_relaxed);
         read_pos_.store(0, std::memory_order_relaxed);
     }
     
     ~RingBuffer() {
-        delete[] buffer_;
+#if defined(_WIN32) || defined(_WIN64)
+        if (buffer_) _aligned_free(buffer_);
+#else
+        if (buffer_) std::free(buffer_);
+#endif
     }
     
     // Non-copyable, non-movable
@@ -54,6 +68,8 @@ public:
     /// @param count  Number of elements to write
     /// @return Number of elements actually written (may be less if buffer full)
     size_t write(const T* data, size_t count) {
+        if (!buffer_ || !data || count == 0) return 0;
+
         const size_t w = write_pos_.load(std::memory_order_relaxed);
         const size_t r = read_pos_.load(std::memory_order_acquire);
         
@@ -77,9 +93,11 @@ public:
     
     /// Read data from the ring buffer (consumer side).
     /// @param dest   Destination buffer
-    /// @param length Number of bytes to read
-    /// @return Number of bytes actually read (may be less if not enough data)
+    /// @param count  Number of elements to read
+    /// @return Number of elements actually read (may be less if not enough data)
     size_t read(T* dest, size_t count) {
+        if (!buffer_ || !dest || count == 0) return 0;
+
         const size_t r = read_pos_.load(std::memory_order_relaxed);
         const size_t w = write_pos_.load(std::memory_order_acquire);
         
@@ -103,6 +121,8 @@ public:
     
     /// Read data without advancing the read position (peek).
     size_t peek(T* dest, size_t count) const {
+        if (!buffer_ || !dest || count == 0) return 0;
+
         const size_t r = read_pos_.load(std::memory_order_relaxed);
         const size_t w = write_pos_.load(std::memory_order_acquire);
         
@@ -128,6 +148,26 @@ public:
         const size_t r = read_pos_.load(std::memory_order_relaxed);
         read_pos_.store(r + count, std::memory_order_release);
     }
+
+    /// Drain/skip old elements, keeping at most `keep_count` newest elements in the buffer.
+    /// Thread-safe for consumer thread.
+    /// Returns number of elements skipped/dropped.
+    size_t drain_to_latest(size_t keep_count) {
+        const size_t r = read_pos_.load(std::memory_order_relaxed);
+        const size_t w = write_pos_.load(std::memory_order_acquire);
+        const size_t available = w - r;
+        if (available > keep_count) {
+            size_t to_drop = available - keep_count;
+            read_pos_.store(r + to_drop, std::memory_order_release);
+            return to_drop;
+        }
+        return 0;
+    }
+
+    /// Drain all pending elements. Thread-safe for consumer thread.
+    size_t drain_all() {
+        return drain_to_latest(0);
+    }
     
     /// Number of elements available for reading
     size_t available_read() const {
@@ -150,7 +190,9 @@ public:
     void reset() {
         write_pos_.store(0, std::memory_order_relaxed);
         read_pos_.store(0, std::memory_order_relaxed);
-        std::memset(buffer_, 0, capacity_ * sizeof(T));
+        if (buffer_) {
+            std::memset(buffer_, 0, capacity_ * sizeof(T));
+        }
     }
     
     /// Check if buffer is empty
@@ -167,6 +209,7 @@ public:
 
 private:
     static size_t next_power_of_2(size_t v) {
+        if (v <= 1) return 1;
         v--;
         v |= v >> 1;
         v |= v >> 2;

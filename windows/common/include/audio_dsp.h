@@ -341,6 +341,7 @@ public:
         set_gain_percent(50); // 50% = 0 dB Unity (CORRECT DEFAULT)
         hpf_enabled_ = true;
         compressor_enabled_ = true;
+        limiter_enabled_ = true;
         expander_.set_level(NoiseGateLevel::Medium);
     }
 
@@ -361,14 +362,20 @@ public:
 
     // Gain Mapping: 0% = -12 dB, 50% = 0 dB (Unity), 100% = +12 dB
     void set_gain_percent(int percent) {
-        percent = std::clamp(percent, 0, 100);
-        float db = (static_cast<float>(percent) / 100.0f) * 24.0f - 12.0f;
+        percent_ = std::clamp(percent, 0, 100);
+        float db = (static_cast<float>(percent_) / 100.0f) * 24.0f - 12.0f;
         gain_linear_ = std::pow(10.0f, db / 20.0f);
     }
 
     void set_gain_db(float db) {
         gain_linear_ = std::pow(10.0f, db / 20.0f);
     }
+
+    int gain_percent() const { return percent_; }
+    bool is_muted() const { return is_muted_; }
+    bool is_hpf_enabled() const { return hpf_enabled_; }
+    bool is_compressor_enabled() const { return compressor_enabled_; }
+    bool is_limiter_enabled() const { return limiter_enabled_; }
 
     void set_muted(bool muted) {
         is_muted_ = muted;
@@ -383,7 +390,7 @@ public:
     }
 
     void set_limiter(bool enable) {
-        compressor_enabled_ = enable;
+        limiter_enabled_ = enable;
     }
 
     void set_noise_gate(int level) {
@@ -420,7 +427,9 @@ public:
             }
 
             // Step 5: 1ms Lookahead True-Peak Limiter (-1.0 dBFS Ceiling)
-            limiter_.process_frame(l, r);
+            if (limiter_enabled_) {
+                limiter_.process_frame(l, r);
+            }
 
             frames[i].left = l;
             frames[i].right = r;
@@ -430,9 +439,11 @@ public:
 private:
     float sample_rate_ = 48000.0f;
     float gain_linear_ = 1.0f;
+    int percent_ = 50;
     bool is_muted_ = false;
     bool hpf_enabled_ = true;
     bool compressor_enabled_ = true;
+    bool limiter_enabled_ = true;
 
     HighPassFilter hpf_;
     DownwardsExpander expander_;

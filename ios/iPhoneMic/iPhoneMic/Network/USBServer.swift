@@ -221,14 +221,11 @@ final class USBServer: ObservableObject {
     // MARK: - Private: Data Sending
     
     private func enqueueAndSend(_ data: Data) {
-        DispatchQueue.main.async { [weak self] in
+        networkQueue.async { [weak self] in
             guard let self = self else { return }
-            
             guard !self.activeConnections.isEmpty else { return }
             
-            // Send directly to all connections. Network.framework handles internal buffering.
-            // For real-time audio, if a client is completely stalled, the OS will eventually
-            // drop the connection. This avoids stalling all other fast clients.
+            // Send directly to all connections on dedicated network queue for minimum latency.
             for connection in self.activeConnections {
                 connection.send(content: data, completion: .contentProcessed { error in
                     if let error = error {
@@ -237,7 +234,9 @@ final class USBServer: ObservableObject {
                 })
             }
             
-            self.bytesSent += UInt64(data.count)
+            DispatchQueue.main.async { [weak self] in
+                self?.bytesSent += UInt64(data.count)
+            }
         }
     }
     

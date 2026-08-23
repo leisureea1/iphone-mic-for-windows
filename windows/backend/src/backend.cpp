@@ -13,6 +13,7 @@
 #include "ring_buffer.h"
 #include "audio_format.h"
 #include "audio_dsp.h"
+#include "registry_utils.h"
 
 #define MINIAUDIO_IMPLEMENTATION
 #include "miniaudio.h"
@@ -38,7 +39,7 @@ ma_device g_AudioDevice;
 bool g_AudioDeviceReady = false;
 
 bool g_IsPrebuffered = false;
-const size_t PREBUFFER_FRAMES = 48000 * 20 / 1000; // 20ms of audio (960 frames)
+const size_t PREBUFFER_FRAMES = 128; // ~2.6ms ultra low latency prebuffer @ 48kHz
 
 // Output device enumeration
 struct OutputDeviceInfo {
@@ -54,73 +55,8 @@ std::string g_SavedDeviceName = "";
 void data_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma_uint32 frameCount);
 void SwitchOutputDevice(int deviceIndex);
 
-// Registry helper for sharing config with ASIO driver
-void SaveOutputDeviceToRegistry(const std::string& deviceName) {
-    HKEY hKey;
-    if (RegCreateKeyExA(HKEY_CURRENT_USER, "Software\\iPhoneMic", 0, NULL, 
-        REG_OPTION_NON_VOLATILE, KEY_WRITE, NULL, &hKey, NULL) == ERROR_SUCCESS) {
-        RegSetValueExA(hKey, "ASIOOutputDevice", 0, REG_SZ, 
-            reinterpret_cast<const BYTE*>(deviceName.c_str()), 
-            static_cast<DWORD>(deviceName.length() + 1));
-        RegCloseKey(hKey);
-    }
-}
-
-void SaveDWORDToRegistry(const char* name, DWORD val) {
-    HKEY hKey;
-    if (RegCreateKeyExA(HKEY_CURRENT_USER, "Software\\iPhoneMic", 0, NULL, 
-        REG_OPTION_NON_VOLATILE, KEY_WRITE, NULL, &hKey, NULL) == ERROR_SUCCESS) {
-        RegSetValueExA(hKey, name, 0, REG_DWORD, 
-            reinterpret_cast<const BYTE*>(&val), sizeof(val));
-        RegCloseKey(hKey);
-    }
-}
-
-void LoadDSPSettingsFromRegistry() {
-    HKEY hKey;
-    if (RegOpenKeyExA(HKEY_CURRENT_USER, "Software\\iPhoneMic", 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
-        DWORD dwVal = 0;
-        DWORD dwSize = sizeof(dwVal);
-        if (RegQueryValueExA(hKey, "GainPercent", NULL, NULL, reinterpret_cast<LPBYTE>(&dwVal), &dwSize) == ERROR_SUCCESS) {
-            g_Dsp.set_gain_percent(static_cast<int>(dwVal));
-        }
-        dwSize = sizeof(dwVal);
-        if (RegQueryValueExA(hKey, "IsMuted", NULL, NULL, reinterpret_cast<LPBYTE>(&dwVal), &dwSize) == ERROR_SUCCESS) {
-            g_Dsp.set_muted(dwVal != 0);
-        }
-        dwSize = sizeof(dwVal);
-        if (RegQueryValueExA(hKey, "HighPassFilter", NULL, NULL, reinterpret_cast<LPBYTE>(&dwVal), &dwSize) == ERROR_SUCCESS) {
-            g_Dsp.set_high_pass_filter(dwVal != 0);
-        }
-        dwSize = sizeof(dwVal);
-        if (RegQueryValueExA(hKey, "AGC", NULL, NULL, reinterpret_cast<LPBYTE>(&dwVal), &dwSize) == ERROR_SUCCESS) {
-            g_Dsp.set_agc(dwVal != 0);
-        }
-        dwSize = sizeof(dwVal);
-        if (RegQueryValueExA(hKey, "NoiseGate", NULL, NULL, reinterpret_cast<LPBYTE>(&dwVal), &dwSize) == ERROR_SUCCESS) {
-            g_Dsp.set_noise_gate(static_cast<int>(dwVal));
-        }
-        RegCloseKey(hKey);
-    }
-}
-
 void LoadOutputDeviceFromRegistry() {
-    HKEY hKey;
-    if (RegOpenKeyExA(HKEY_CURRENT_USER, "Software\\iPhoneMic", 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
-        char buffer[256] = {0};
-        DWORD bufferSize = sizeof(buffer);
-        if (RegQueryValueExA(hKey, "ASIOOutputDevice", NULL, NULL, 
-            reinterpret_cast<LPBYTE>(buffer), &bufferSize) == ERROR_SUCCESS) {
-            // Null-terminate explicitly
-            if (bufferSize < sizeof(buffer)) {
-                buffer[bufferSize] = '\0';
-            } else {
-                buffer[sizeof(buffer) - 1] = '\0';
-            }
-            g_SavedDeviceName = buffer;
-        }
-        RegCloseKey(hKey);
-    }
+    g_SavedDeviceName = registry::get_string("ASIOOutputDevice", "");
 }
 
 void EnumerateOutputDevices() {
@@ -168,8 +104,8 @@ void SwitchOutputDevice(int deviceIndex) {
     g_SelectedDeviceIndex = deviceIndex;
     
     // Save to registry
-    if (deviceIndex >= 0 && deviceIndex < (int)g_OutputDevices.size()) {
-        SaveOutputDeviceToRegistry(g_OutputDevices[deviceIndex].name);
+    if (deviceIndex >= 0 && deviceIndex < static_cast<int>(g_OutputDevices.size())) {
+        registry::save_string("ASIOOutputDevice", g_OutputDevices[deviceIndex].name);
     }
     
     g_IsPrebuffered = false;
@@ -180,9 +116,14 @@ void SwitchOutputDevice(int deviceIndex) {
     config.sampleRate        = 48000;
     config.dataCallback      = data_callback;
     config.pUserData         = nullptr;
+    config.performanceProfile = ma_performance_profile_low_latency;
+    config.periodSizeInFrames = 128;
+    config.periods           = 2;
+    config.wasapi.usage      = ma_wasapi_usage_pro_audio;
+    config.wasapi.noAutoConvertSRC = 1;
     
     // Set specific device if not "System Default"
-    if (deviceIndex > 0 && deviceIndex < (int)g_OutputDevices.size()) {
+    if (deviceIndex > 0 && deviceIndex < static_cast<int>(g_OutputDevices.size())) {
         config.playback.pDeviceID = &g_OutputDevices[deviceIndex].id;
     }
     
@@ -194,7 +135,8 @@ void SwitchOutputDevice(int deviceIndex) {
 
 void data_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma_uint32 frameCount)
 {
-    (void)pInput; // Unused
+    (void)pDevice;
+    (void)pInput;
     if (g_MonitorAudio && g_AudioRingBuffer) {
         if (!g_IsPrebuffered) {
             if (g_AudioRingBuffer->available_read() >= PREBUFFER_FRAMES) {
@@ -209,27 +151,28 @@ void data_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma_uin
         if (framesRead < frameCount) {
             // Fill remainder with zeros (silence) to avoid audio glitches
             std::memset(reinterpret_cast<iphone_mic::AudioFrame*>(pOutput) + framesRead, 0, (frameCount - framesRead) * sizeof(iphone_mic::AudioFrame));
-            g_IsPrebuffered = false; // Enter prebuffering mode due to underrun
+            g_IsPrebuffered = false; // Re-enter prebuffering mode due to underrun
         }
     } else {
-        // Output silence
         std::memset(pOutput, 0, frameCount * sizeof(iphone_mic::AudioFrame));
-        // Keep clearing the buffer so old audio doesn't queue up when disabled
         if (g_AudioRingBuffer) {
-            iphone_mic::AudioFrame dummy[1024];
-            while (g_AudioRingBuffer->read(dummy, 1024) > 0) {}
+            g_AudioRingBuffer->drain_all();
         }
         g_IsPrebuffered = false;
     }
 }
 
 void BackgroundUSBThread() {
+    std::vector<uint8_t> payload_buf;
+    payload_buf.reserve(65536);
+    std::vector<iphone_mic::AudioFrame> audio_frames_buf;
+    audio_frames_buf.reserve(1024);
+
     while (g_AppRunning) {
         g_IsConnected = false;
         g_PeakL = 0.0f;
         g_PeakR = 0.0f;
         
-        // Wait for device
         SOCKET sock = UsbMuxClient::connect_to_device(8730);
         if (sock == INVALID_SOCKET) {
             std::this_thread::sleep_for(std::chrono::seconds(1));
@@ -247,54 +190,59 @@ void BackgroundUSBThread() {
             }
 
             if (header.magic == PROTOCOL_MAGIC && header.type == static_cast<uint16_t>(PacketType::AudioData)) {
-                std::vector<uint8_t> payload(header.payload_size);
-                ret = recv(sock, reinterpret_cast<char*>(payload.data()), header.payload_size, MSG_WAITALL);
-                if (ret != header.payload_size) {
+                if (payload_buf.size() < header.payload_size) {
+                    payload_buf.resize(header.payload_size);
+                }
+                ret = recv(sock, reinterpret_cast<char*>(payload_buf.data()), header.payload_size, MSG_WAITALL);
+                if (ret != static_cast<int>(header.payload_size)) {
                     g_IsConnected = false;
                     break;
                 }
 
-                std::vector<iphone_mic::AudioFrame> audioFrames;
-                iphone_mic::audio_convert::pcm16_to_audio_frames(payload.data(), payload.size(), g_AudioChannels.load(), audioFrames);
+                iphone_mic::audio_convert::pcm16_to_audio_frames(payload_buf.data(), header.payload_size, g_AudioChannels.load(), audio_frames_buf);
                 
                 // Apply DSP Pipeline (80Hz HPF, Noise Gate, Gain, AGC / Limiter)
-                g_Dsp.process(audioFrames.data(), audioFrames.size());
+                g_Dsp.process(audio_frames_buf.data(), audio_frames_buf.size());
 
                 float maxL = 0.0f;
                 float maxR = 0.0f;
                 
-                for (const auto& frame : audioFrames) {
+                for (const auto& frame : audio_frames_buf) {
                     maxL = std::max(maxL, std::abs(frame.left));
                     maxR = std::max(maxR, std::abs(frame.right));
                 }
                 
-                // Decay peaks slightly for smoother animation or just set direct
                 g_PeakL = maxL;
                 g_PeakR = maxR;
 
                 // Push to playback buffer if monitoring
                 if (g_MonitorAudio && g_AudioRingBuffer) {
-                    size_t written = g_AudioRingBuffer->write(audioFrames.data(), audioFrames.size());
-                    if (written < audioFrames.size()) {
-                        g_DroppedFrames += (audioFrames.size() - written);
+                    // Keep buffer under 512 frames (~10.6ms) for immediate monitoring response
+                    if (g_AudioRingBuffer->available_read() > 512) {
+                        g_AudioRingBuffer->drain_to_latest(256);
+                    }
+                    size_t written = g_AudioRingBuffer->write(audio_frames_buf.data(), audio_frames_buf.size());
+                    if (written < audio_frames_buf.size()) {
+                        g_DroppedFrames += (audio_frames_buf.size() - written);
                     }
                 }
                 
             } else if (header.magic == PROTOCOL_MAGIC && header.type == static_cast<uint16_t>(PacketType::Config)) {
-                std::vector<uint8_t> payload(header.payload_size);
-                ret = recv(sock, reinterpret_cast<char*>(payload.data()), header.payload_size, MSG_WAITALL);
-                if (ret != header.payload_size) {
+                if (payload_buf.size() < header.payload_size) {
+                    payload_buf.resize(header.payload_size);
+                }
+                ret = recv(sock, reinterpret_cast<char*>(payload_buf.data()), header.payload_size, MSG_WAITALL);
+                if (ret != static_cast<int>(header.payload_size)) {
                     g_IsConnected = false;
                     break;
                 }
                 
-                std::string json(payload.begin(), payload.end());
+                std::string json(payload_buf.data(), payload_buf.data() + header.payload_size);
                 auto cfg = AudioConfig::from_json(json);
                 if (cfg && cfg->channels > 0) {
                     g_AudioChannels.store(cfg->channels);
                 }
                 
-                // Send ConfigAck
                 PacketHeader ack_header;
                 ack_header.magic = PROTOCOL_MAGIC;
                 ack_header.version = PROTOCOL_VERSION;
@@ -306,10 +254,11 @@ void BackgroundUSBThread() {
                 send(sock, reinterpret_cast<const char*>(&ack_header), sizeof(ack_header), 0);
                 
             } else {
-                // Unknown packet, skip payload
                 if (header.payload_size > 0) {
-                    std::vector<uint8_t> dummy(header.payload_size);
-                    recv(sock, reinterpret_cast<char*>(dummy.data()), header.payload_size, MSG_WAITALL);
+                    if (payload_buf.size() < header.payload_size) {
+                        payload_buf.resize(header.payload_size);
+                    }
+                    recv(sock, reinterpret_cast<char*>(payload_buf.data()), header.payload_size, MSG_WAITALL);
                 }
             }
         }
@@ -328,12 +277,12 @@ EXPORT void Backend_Init() {
     WSADATA wsa_data;
     WSAStartup(MAKEWORD(2, 2), &wsa_data);
     
-    // Initialize audio ring buffer
-    g_AudioRingBuffer = std::make_unique<RingBuffer<iphone_mic::AudioFrame>>(96000);
+    // Initialize audio ring buffer (8192 frames = ~170ms max cushion)
+    g_AudioRingBuffer = std::make_unique<RingBuffer<iphone_mic::AudioFrame>>(8192);
     
     // Load saved device preference and DSP settings
     LoadOutputDeviceFromRegistry();
-    LoadDSPSettingsFromRegistry();
+    registry::apply_dsp_settings(g_Dsp);
 
     // Enumerate and initialize audio output device
     EnumerateOutputDevices();
@@ -348,14 +297,13 @@ EXPORT void Backend_Shutdown() {
     
     g_AppRunning = false;
     
-    // Create a dummy socket connection to unblock the recv call if it's blocked
     SOCKET dummy = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (dummy != INVALID_SOCKET) {
         sockaddr_in addr;
         addr.sin_family = AF_INET;
         addr.sin_addr.s_addr = inet_addr("127.0.0.1");
         addr.sin_port = htons(27015);
-        connect(dummy, (SOCKADDR*)&addr, sizeof(addr));
+        connect(dummy, reinterpret_cast<SOCKADDR*>(&addr), sizeof(addr));
         closesocket(dummy);
     }
 
@@ -372,12 +320,11 @@ EXPORT void Backend_Shutdown() {
     WSACleanup();
 }
 
-// Returns a comma-separated list of devices. Caller should not free the pointer, it is static.
 EXPORT const char* Backend_GetOutputDevicesCSV() {
     static std::string result;
     result.clear();
     
-    EnumerateOutputDevices(); // refresh
+    EnumerateOutputDevices();
     for (size_t i = 0; i < g_OutputDevices.size(); ++i) {
         result += g_OutputDevices[i].name;
         if (i < g_OutputDevices.size() - 1) {
@@ -392,13 +339,17 @@ EXPORT int Backend_GetSelectedDeviceIndex() {
 }
 
 EXPORT void Backend_SetOutputDevice(int index) {
-    if (index >= 0 && index < (int)g_OutputDevices.size()) {
+    if (index >= 0 && index < static_cast<int>(g_OutputDevices.size())) {
         SwitchOutputDevice(index);
     }
 }
 
 EXPORT void Backend_SetMonitorAudio(bool enable) {
+    if (enable && g_AudioRingBuffer) {
+        g_AudioRingBuffer->drain_all();
+    }
     g_MonitorAudio = enable;
+    g_IsPrebuffered = false;
 }
 
 EXPORT bool Backend_GetMonitorAudio() {
@@ -417,31 +368,44 @@ EXPORT void Backend_GetAudioLevels(float* left, float* right) {
 // DSP Controls
 EXPORT void Backend_SetGainPercent(int percent) {
     g_Dsp.set_gain_percent(percent);
-    SaveDWORDToRegistry("GainPercent", static_cast<DWORD>(percent));
+    registry::save_dword("GainPercent", static_cast<DWORD>(percent));
 }
 
 EXPORT void Backend_SetMuted(bool mute) {
     g_Dsp.set_muted(mute);
-    SaveDWORDToRegistry("IsMuted", mute ? 1 : 0);
+    registry::save_dword("IsMuted", mute ? 1 : 0);
 }
 
 EXPORT void Backend_SetHighPassFilter(bool enable) {
     g_Dsp.set_high_pass_filter(enable);
-    SaveDWORDToRegistry("HighPassFilter", enable ? 1 : 0);
+    registry::save_dword("HighPassFilter", enable ? 1 : 0);
 }
 
 EXPORT void Backend_SetAGC(bool enable) {
     g_Dsp.set_agc(enable);
-    SaveDWORDToRegistry("AGC", enable ? 1 : 0);
+    registry::save_dword("AGC", enable ? 1 : 0);
+}
+
+EXPORT void Backend_SetLimiter(bool enable) {
+    g_Dsp.set_limiter(enable);
+    registry::save_dword("Limiter", enable ? 1 : 0);
 }
 
 EXPORT void Backend_SetNoiseGate(int level) {
     g_Dsp.set_noise_gate(level);
-    SaveDWORDToRegistry("NoiseGate", static_cast<DWORD>(level));
+    registry::save_dword("NoiseGate", static_cast<DWORD>(level));
 }
 
 EXPORT void Backend_SetBufferSize(int size) {
-    SaveDWORDToRegistry("BufferSize", static_cast<DWORD>(size));
+    registry::save_dword("BufferSize", static_cast<DWORD>(size));
+}
+
+EXPORT void Backend_SetRecordOffset(int samples) {
+    registry::save_dword("RecordOffsetSamples", static_cast<DWORD>(samples));
+}
+
+EXPORT int Backend_GetRecordOffset() {
+    return static_cast<int>(registry::get_dword("RecordOffsetSamples", 0));
 }
 
 EXPORT uint64_t Backend_GetDroppedFrames() {
@@ -456,18 +420,13 @@ EXPORT int Backend_GetSampleRate() {
 }
 
 EXPORT int Backend_GetBufferSize() {
-    HKEY hKey;
-    DWORD dwVal = 0;
-    DWORD dwSize = sizeof(dwVal);
-    if (RegOpenKeyExA(HKEY_CURRENT_USER, "Software\\iPhoneMic", 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
-        RegQueryValueExA(hKey, "BufferSize", NULL, NULL, reinterpret_cast<LPBYTE>(&dwVal), &dwSize);
-        RegCloseKey(hKey);
-    }
-    return static_cast<int>(dwVal);
+    return static_cast<int>(registry::get_dword("BufferSize", 256));
 }
 
 // Main DLL entry point
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD  ul_reason_for_call, LPVOID lpReserved) {
+    (void)hModule;
+    (void)lpReserved;
     switch (ul_reason_for_call) {
     case DLL_PROCESS_ATTACH:
     case DLL_THREAD_ATTACH:
@@ -477,3 +436,4 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD  ul_reason_for_call, LPVOID lpReser
     }
     return TRUE;
 }
+

@@ -50,10 +50,10 @@ class AudioConfig: ObservableObject {
     @Published var bufferSize: SupportedBufferSize = .size256
     @Published var channelMode: ChannelMode = .mono
     
-    /// Fixed at 24-bit for this application
-    let bitDepth: Int = 24
+    /// Fixed at 16-bit for uncompressed low-latency transmission
+    let bitDepth: Int = 16
     
-    /// Bytes per sample (24-bit = 3 bytes)
+    /// Bytes per sample (16-bit = 2 bytes)
     var bytesPerSample: Int { bitDepth / 8 }
     
     /// Bytes per frame (bytesPerSample * channels)

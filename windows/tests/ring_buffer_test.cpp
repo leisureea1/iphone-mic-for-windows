@@ -219,6 +219,34 @@ TEST(audio_buffer_sizes) {
     }
 }
 
+TEST(drain_to_latest) {
+    RingBuffer<int> rb(64);
+    for (int i = 0; i < 20; i++) {
+        rb.write(&i, 1);
+    }
+    assert(rb.available_read() == 20);
+    
+    // Drain so that only the latest 5 elements remain
+    size_t dropped = rb.drain_to_latest(5);
+    assert(dropped == 15);
+    assert(rb.available_read() == 5);
+    
+    int out[5];
+    assert(rb.read(out, 5) == 5);
+    for (int i = 0; i < 5; i++) {
+        assert(out[i] == 15 + i);
+    }
+    
+    // Drain when already below target
+    assert(rb.drain_to_latest(5) == 0);
+    
+    // Drain all
+    rb.write(out, 3);
+    assert(rb.available_read() == 3);
+    assert(rb.drain_all() == 3);
+    assert(rb.empty());
+}
+
 // ============================================================================
 // Main
 // ============================================================================
