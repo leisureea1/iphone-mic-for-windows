@@ -2,7 +2,7 @@ appId: com.iphonemic.app
 productName: iPhone Mic
 directories:
   buildResources: build
-  output: ../../dist
+  output: ../../dist-installer
 win:
   target: nsis
   requestedExecutionLevel: requireAdministrator
