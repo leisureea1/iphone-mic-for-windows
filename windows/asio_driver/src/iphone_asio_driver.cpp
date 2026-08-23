@@ -128,6 +128,7 @@ ASIOError iPhoneAsioDriver::start() {
     // Reset sample position
     sample_position_.store(0);
     current_buffer_index_ = 0;
+    is_prebuffered_ = false;
     
     // Reset ASRC & DSP state
     resampler_.reset();
@@ -135,9 +136,9 @@ ASIOError iPhoneAsioDriver::start() {
     load_dsp_settings_from_registry();
     update_latency_offset_from_registry();
     
-    // Prune any stale audio queued up in input ring buffer down to target low-latency cushion
-    if (input_ring_buffer_) {
-        input_ring_buffer_->drain_to_latest(static_cast<size_t>(buffer_size_ * 2));
+    // Drain any extreme backlog if needed
+    if (input_ring_buffer_ && input_ring_buffer_->available_read() > static_cast<size_t>(buffer_size_ * 8)) {
+        input_ring_buffer_->drain_to_latest(static_cast<size_t>(buffer_size_ * 3));
     }
     
     // Start output playback engine
@@ -788,32 +789,6 @@ void iPhoneAsioDriver::process_audio_buffer() {
         work_output_frames_.resize(frames_needed, {0.0f, 0.0f});
     }
     
-    // ==========================================
-    // 1. Process INPUT (iPhone -> DAW) with ASRC
-    // ==========================================
-    
-    if (input_ring_buffer_) {
-        // Maintain low-latency target cushion: 2 buffer periods (e.g. 512 frames @ 256 buffer = ~10.6ms)
-        double fill = input_ring_buffer_->fill_ratio();
-        double target = static_cast<double>(buffer_size_ * 2) / static_cast<double>(input_ring_buffer_->capacity());
-        resampler_.update_ratio(fill, target);
-
-        // If network jitter caused excess backlog (> 4 buffer periods), prune old frames to stay in real-time
-        size_t max_backlog = static_cast<size_t>(buffer_size_ * 4);
-        if (input_ring_buffer_->available_read() > max_backlog) {
-            input_ring_buffer_->drain_to_latest(static_cast<size_t>(buffer_size_ * 2));
-        }
-    }
-    
-    size_t read_count = frames_needed + 2;
-    size_t frames_available = 0;
-    
-    if (input_ring_buffer_) {
-        frames_available = input_ring_buffer_->available_read();
-        if (frames_available > read_count) frames_available = read_count;
-        frames_available = input_ring_buffer_->peek(work_raw_input_.data(), frames_available);
-    }
-    
     // Periodically reload DSP & latency settings from registry (~every 100ms)
     if (++check_dsp_counter_ >= 32) {
         check_dsp_counter_ = 0;
@@ -821,22 +796,57 @@ void iPhoneAsioDriver::process_audio_buffer() {
         update_latency_offset_from_registry();
     }
 
-    // Run ASRC into preallocated buffer: produce exactly frames_needed output frames
-    size_t frames_consumed = 0;
-    if (frames_available > 0) {
-        frames_consumed = resampler_.process(work_raw_input_.data(), frames_available,
-                                             work_resampled_.data(), frames_needed);
-        // Apply Audio DSP Pipeline (80Hz HPF Low-Cut, Noise Gate, Gain, AGC / Limiter)
-        dsp_.process(work_resampled_.data(), frames_needed);
+    // ==========================================
+    // 1. Process INPUT (iPhone -> DAW)
+    // ==========================================
+    
+    bool has_audio = false;
+    if (input_ring_buffer_) {
+        // High watermark anti-backlog: only trim if excessive backlog accumulates (> 10 buffers / ~80ms)
+        size_t max_backlog = static_cast<size_t>(buffer_size_ * 10);
+        if (input_ring_buffer_->available_read() > max_backlog) {
+            input_ring_buffer_->drain_to_latest(static_cast<size_t>(buffer_size_ * 3));
+        }
+
+        // Jitter prebuffering cushion (requires 3 buffer periods ~ 16ms to start streaming)
+        size_t min_cushion = static_cast<size_t>(buffer_size_ * 3);
+        if (!is_prebuffered_) {
+            if (input_ring_buffer_->available_read() >= min_cushion) {
+                is_prebuffered_ = true;
+            }
+        }
+
+        if (is_prebuffered_) {
+            size_t available = input_ring_buffer_->available_read();
+            if (available >= frames_needed) {
+                size_t read_count = input_ring_buffer_->read(work_resampled_.data(), frames_needed);
+                if (read_count < frames_needed) {
+                    std::memset(work_resampled_.data() + read_count, 0, (frames_needed - read_count) * sizeof(AudioFrame));
+                    is_prebuffered_ = false;
+                }
+                has_audio = true;
+            } else if (available > 0) {
+                size_t read_count = input_ring_buffer_->read(work_resampled_.data(), available);
+                std::memset(work_resampled_.data() + read_count, 0, (frames_needed - read_count) * sizeof(AudioFrame));
+                is_prebuffered_ = false;
+                has_audio = true;
+            } else {
+                std::memset(work_resampled_.data(), 0, frames_needed * sizeof(AudioFrame));
+                is_prebuffered_ = false;
+            }
+        } else {
+            std::memset(work_resampled_.data(), 0, frames_needed * sizeof(AudioFrame));
+        }
     } else {
         std::memset(work_resampled_.data(), 0, frames_needed * sizeof(AudioFrame));
     }
-    
-    if (input_ring_buffer_ && frames_consumed > 0) {
-        input_ring_buffer_->advance_read(frames_consumed);
+
+    if (has_audio) {
+        // Apply Audio DSP Pipeline (80Hz HPF Low-Cut, Noise Gate, Gain, AGC / Limiter)
+        dsp_.process(work_resampled_.data(), frames_needed);
     }
     
-    // De-interleave into per-channel ASIO buffers (Int32 format)
+    // De-interleave into per-channel ASIO buffers (Int32 format with strict clamping)
     for (long ch_idx = 0; ch_idx < num_active_channels_; ++ch_idx) {
         auto& cb = channel_buffers_[ch_idx];
         if (!cb.is_input) continue; // Only process input channels here
@@ -849,11 +859,13 @@ void iPhoneAsioDriver::process_audio_buffer() {
         
         if (src_channel == 0) { // Left
             for (long s = 0; s < buffer_size_; ++s) {
-                dst[s] = static_cast<int32_t>(work_resampled_[s].left * 2147483520.0f);
+                float sample = std::clamp(work_resampled_[s].left, -1.0f, 1.0f);
+                dst[s] = static_cast<int32_t>(sample * 2147483520.0f);
             }
         } else if (src_channel == 1) { // Right
             for (long s = 0; s < buffer_size_; ++s) {
-                dst[s] = static_cast<int32_t>(work_resampled_[s].right * 2147483520.0f);
+                float sample = std::clamp(work_resampled_[s].right, -1.0f, 1.0f);
+                dst[s] = static_cast<int32_t>(sample * 2147483520.0f);
             }
         } else {
             std::memset(dst, 0, frames_needed * sizeof(int32_t));

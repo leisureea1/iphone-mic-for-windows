@@ -209,10 +209,10 @@ public:
                 output[out].left  = input[idx0].left  * (1.0f - frac_f) + input[idx0 + 1].left  * frac_f;
                 output[out].right = input[idx0].right * (1.0f - frac_f) + input[idx0 + 1].right * frac_f;
             } else if (idx0 < input_count) {
-                output[out].left  = input[idx0].left  * (1.0f - frac_f) + prev_frame_.left  * frac_f;
-                output[out].right = input[idx0].right * (1.0f - frac_f) + prev_frame_.right * frac_f;
+                output[out].left  = input[idx0].left  * (1.0f - frac_f);
+                output[out].right = input[idx0].right * (1.0f - frac_f);
             } else {
-                output[out] = prev_frame_;
+                output[out] = {0.0f, 0.0f};
             }
             
             phase_ += ratio_smoothed_;

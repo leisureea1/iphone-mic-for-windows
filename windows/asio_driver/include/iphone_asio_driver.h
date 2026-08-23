@@ -185,6 +185,7 @@ private:
     
     // Latency compensation offset (samples)
     long record_offset_samples_ = 0;
+    bool is_prebuffered_ = false;
 
     // Private methods
     void start_usb_client();
