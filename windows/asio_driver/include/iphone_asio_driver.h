@@ -16,6 +16,7 @@
 #include "ring_buffer.h"
 #include "protocol.h"
 #include "audio_format.h"
+#include "audio_dsp.h"
 
 // Forward declare ma_device to avoid including full miniaudio.h in the header
 typedef struct ma_device ma_device;
@@ -168,6 +169,10 @@ private:
     // ASRC: Adaptive resampler for clock drift compensation
     AdaptiveResampler resampler_;
     
+    // DSP Pipeline (HPF, Noise Gate, Gain, AGC Limiter)
+    AudioDSPPipeline dsp_;
+    std::atomic<uint64_t> dropped_frames_{0};
+    
     // Output Playback Device (miniaudio)
     ma_device* playback_device_ = nullptr;
     
@@ -182,6 +187,7 @@ private:
     
     void process_audio_buffer();
     void fill_silence(long buffer_index);
+    void load_dsp_settings_from_registry();
     
     bool is_valid_buffer_size(long size) const;
     

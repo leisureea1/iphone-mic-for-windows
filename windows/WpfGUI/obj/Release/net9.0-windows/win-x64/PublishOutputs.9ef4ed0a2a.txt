@@ -1,2 +1,0 @@
-E:\mic\windows\WpfGUI\bin\Release\net9.0-windows\win-x64\publish\iPhoneMic.pdb
-E:\mic\windows\WpfGUI\bin\Release\net9.0-windows\win-x64\publish\iPhoneMic.exe

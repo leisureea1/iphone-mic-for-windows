@@ -127,8 +127,10 @@ ASIOError iPhoneAsioDriver::start() {
     sample_position_.store(0);
     current_buffer_index_ = 0;
     
-    // Reset ASRC state
+    // Reset ASRC & DSP state
     resampler_.reset();
+    dsp_.reset();
+    load_dsp_settings_from_registry();
     
     // Start output playback engine
     start_playback_engine();
@@ -197,6 +199,11 @@ void iPhoneAsioDriver::start_playback_engine() {
     config.sampleRate        = 48000;
     config.dataCallback      = asio_playback_data_callback;
     config.pUserData         = this;
+    config.performanceProfile = ma_performance_profile_low_latency;
+    config.periodSizeInFrames = static_cast<ma_uint32>(buffer_size_ > 0 ? buffer_size_ : 128);
+    config.periods           = 2;
+    config.wasapi.usage      = ma_wasapi_usage_pro_audio;
+    config.wasapi.noAutoConvertSRC = 1;
     
     // If a specific device was saved, we need to find its ID
     ma_device_id deviceId;
@@ -271,6 +278,20 @@ ASIOError iPhoneAsioDriver::getBufferSize(long* minSize, long* maxSize,
     *minSize = MIN_BUFFER_SIZE;
     *maxSize = MAX_BUFFER_SIZE;
     *preferredSize = PREFERRED_BUFFER_SIZE;
+
+    // Check registry for user preference
+    HKEY hKey;
+    if (RegOpenKeyExA(HKEY_CURRENT_USER, "Software\\iPhoneMic", 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+        DWORD dwVal = 0;
+        DWORD dwSize = sizeof(dwVal);
+        if (RegQueryValueExA(hKey, "BufferSize", NULL, NULL, reinterpret_cast<LPBYTE>(&dwVal), &dwSize) == ERROR_SUCCESS) {
+            if (is_valid_buffer_size(static_cast<long>(dwVal))) {
+                *preferredSize = static_cast<long>(dwVal);
+            }
+        }
+        RegCloseKey(hKey);
+    }
+
     *granularity = -1;  // -1 = power of 2 steps
     return ASE_OK;
 }
@@ -457,10 +478,23 @@ static const char* get_self_address() {
 }
 
 ASIOError iPhoneAsioDriver::controlPanel() {
-    // Try to launch the GUI control panel application
-    // It should be in the same directory as the driver DLL
-    
-    char dll_path[MAX_PATH] = {};
+    // 1. Try registry path first
+    HKEY hKey;
+    if (RegOpenKeyExA(HKEY_CURRENT_USER, "Software\\iPhoneMic", 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+        char regExe[MAX_PATH] = {};
+        DWORD regSize = sizeof(regExe);
+        if (RegQueryValueExA(hKey, "InstallPath", NULL, NULL, reinterpret_cast<LPBYTE>(regExe), &regSize) == ERROR_SUCCESS) {
+            if (GetFileAttributesA(regExe) != INVALID_FILE_ATTRIBUTES) {
+                HINSTANCE result = ShellExecuteA(sys_handle_, "open", regExe, nullptr, nullptr, SW_SHOWNORMAL);
+                RegCloseKey(hKey);
+                if (reinterpret_cast<intptr_t>(result) > 32) return ASE_OK;
+            }
+        }
+        RegCloseKey(hKey);
+    }
+
+    // 2. Try candidate exe names next to driver DLL or in common paths
+    char dll_dir[MAX_PATH] = {};
     HMODULE hModule = nullptr;
     GetModuleHandleExA(
         GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
@@ -468,19 +502,34 @@ ASIOError iPhoneAsioDriver::controlPanel() {
         &hModule);
     
     if (hModule) {
-        GetModuleFileNameA(hModule, dll_path, MAX_PATH);
-        // Replace DLL filename with GUI exe
-        char* last_slash = strrchr(dll_path, '\\');
+        GetModuleFileNameA(hModule, dll_dir, MAX_PATH);
+        char* last_slash = strrchr(dll_dir, '\\');
         if (last_slash) {
-            *(last_slash + 1) = '\0';
-            strcat_s(dll_path, "iphone_mic_gui.exe");
-            
-            // Try to launch the GUI
-            HINSTANCE result = ShellExecuteA(
-                sys_handle_, "open", dll_path, nullptr, nullptr, SW_SHOWNORMAL);
-            
-            if (reinterpret_cast<intptr_t>(result) > 32) {
-                return ASE_OK;  // Successfully launched
+            *last_slash = '\0';
+        }
+    }
+
+    const char* candidates[] = {
+        "\\iPhone Mic.exe",
+        "\\iPhoneMic.exe",
+        "\\iphone_mic.exe",
+        "\\iphone_mic_gui.exe",
+        "\\..\\..\\..\\dist\\win-unpacked\\iPhone Mic.exe",
+        "\\..\\..\\..\\dist\\iPhoneMic_Setup.exe"
+    };
+
+    for (const char* candidate : candidates) {
+        char target_path[MAX_PATH] = {};
+        strcpy_s(target_path, dll_dir);
+        strcat_s(target_path, candidate);
+        
+        char resolved[MAX_PATH] = {};
+        if (GetFullPathNameA(target_path, MAX_PATH, resolved, nullptr)) {
+            if (GetFileAttributesA(resolved) != INVALID_FILE_ATTRIBUTES) {
+                HINSTANCE result = ShellExecuteA(sys_handle_, "open", resolved, nullptr, nullptr, SW_SHOWNORMAL);
+                if (reinterpret_cast<intptr_t>(result) > 32) {
+                    return ASE_OK;
+                }
             }
         }
     }
@@ -489,14 +538,11 @@ ASIOError iPhoneAsioDriver::controlPanel() {
     if (sys_handle_) {
         MessageBoxA(sys_handle_, 
             "iPhone USB Microphone ASIO v1.0\n\n"
-            "1. Connect iPhone via USB\n"
-            "2. Start iPhoneMic app on iPhone\n"
-            "3. Audio streams automatically via USB\n\n"
-            "Settings:\n"
-            "  Sample Rate: 48000 Hz\n"
-            "  Format: 32-bit Integer\n"
-            "  Buffer: 64 / 128 / 256 / 512 samples\n"
-            "  ASRC: Enabled (adaptive clock drift compensation)",
+            "请启动 iPhoneMic 控制中心 (iPhone Mic.exe) 进行设备与音频设置。\n\n"
+            "支持特性：\n"
+            "• 48000 Hz / 32-bit 低延迟输出\n"
+            "• 原生 USB 耳机与声卡直通\n"
+            "• ASRC 硬件时钟自适应同步",
             DRIVER_NAME,
             MB_OK | MB_ICONINFORMATION);
     }
@@ -728,12 +774,21 @@ void iPhoneAsioDriver::process_audio_buffer() {
         frames_available = input_ring_buffer_->peek(raw_input.data(), frames_available);
     }
     
+    // Periodically reload DSP settings from registry (~every 100ms)
+    static int check_dsp_counter = 0;
+    if (++check_dsp_counter >= 32) {
+        check_dsp_counter = 0;
+        load_dsp_settings_from_registry();
+    }
+
     // Run ASRC: produce exactly frames_needed output frames
     std::vector<AudioFrame> resampled(frames_needed, {0.0f, 0.0f});
     size_t frames_consumed = 0;
     if (frames_available > 0) {
         frames_consumed = resampler_.process(raw_input.data(), frames_available,
                                              resampled.data(), frames_needed);
+        // Apply Audio DSP Pipeline (80Hz HPF Low-Cut, Noise Gate, Gain, AGC / Limiter)
+        dsp_.process(resampled.data(), frames_needed);
     } else {
         // Output silence if no data
         std::memset(resampled.data(), 0, frames_needed * sizeof(AudioFrame));
@@ -851,6 +906,45 @@ bool iPhoneAsioDriver::is_valid_buffer_size(long size) const {
         if (VALID_BUFFER_SIZES[i] == size) return true;
     }
     return false;
+}
+
+void iPhoneAsioDriver::load_dsp_settings_from_registry() {
+    HKEY hKey;
+    if (RegOpenKeyExA(HKEY_CURRENT_USER, "Software\\iPhoneMic", 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+        DWORD dwVal = 0;
+        DWORD dwSize = sizeof(dwVal);
+
+        // GainPercent (0 - 100)
+        if (RegQueryValueExA(hKey, "GainPercent", NULL, NULL, reinterpret_cast<LPBYTE>(&dwVal), &dwSize) == ERROR_SUCCESS) {
+            dsp_.set_gain_percent(static_cast<int>(dwVal));
+        }
+
+        // IsMuted (0 or 1)
+        dwSize = sizeof(dwVal);
+        if (RegQueryValueExA(hKey, "IsMuted", NULL, NULL, reinterpret_cast<LPBYTE>(&dwVal), &dwSize) == ERROR_SUCCESS) {
+            dsp_.set_muted(dwVal != 0);
+        }
+
+        // HighPassFilter (0 or 1)
+        dwSize = sizeof(dwVal);
+        if (RegQueryValueExA(hKey, "HighPassFilter", NULL, NULL, reinterpret_cast<LPBYTE>(&dwVal), &dwSize) == ERROR_SUCCESS) {
+            dsp_.set_high_pass_filter(dwVal != 0);
+        }
+
+        // AGC (0 or 1)
+        dwSize = sizeof(dwVal);
+        if (RegQueryValueExA(hKey, "AGC", NULL, NULL, reinterpret_cast<LPBYTE>(&dwVal), &dwSize) == ERROR_SUCCESS) {
+            dsp_.set_agc(dwVal != 0);
+        }
+
+        // NoiseGate (0, 1, 2, 3)
+        dwSize = sizeof(dwVal);
+        if (RegQueryValueExA(hKey, "NoiseGate", NULL, NULL, reinterpret_cast<LPBYTE>(&dwVal), &dwSize) == ERROR_SUCCESS) {
+            dsp_.set_noise_gate(static_cast<int>(dwVal));
+        }
+
+        RegCloseKey(hKey);
+    }
 }
 
 } // namespace iphone_mic

@@ -12,6 +12,7 @@
 #include "protocol.h"
 #include "ring_buffer.h"
 #include "audio_format.h"
+#include "audio_dsp.h"
 
 #define MINIAUDIO_IMPLEMENTATION
 #include "miniaudio.h"
@@ -25,7 +26,9 @@ std::atomic<bool> g_AppRunning = false;
 std::atomic<bool> g_IsConnected = false;
 std::atomic<float> g_PeakL = 0.0f;
 std::atomic<float> g_PeakR = 0.0f;
+std::atomic<uint64_t> g_DroppedFrames = 0;
 std::thread g_UsbThread;
+AudioDSPPipeline g_Dsp;
 
 // Audio Playback
 std::atomic<bool> g_MonitorAudio = false;
@@ -59,6 +62,44 @@ void SaveOutputDeviceToRegistry(const std::string& deviceName) {
         RegSetValueExA(hKey, "ASIOOutputDevice", 0, REG_SZ, 
             reinterpret_cast<const BYTE*>(deviceName.c_str()), 
             static_cast<DWORD>(deviceName.length() + 1));
+        RegCloseKey(hKey);
+    }
+}
+
+void SaveDWORDToRegistry(const char* name, DWORD val) {
+    HKEY hKey;
+    if (RegCreateKeyExA(HKEY_CURRENT_USER, "Software\\iPhoneMic", 0, NULL, 
+        REG_OPTION_NON_VOLATILE, KEY_WRITE, NULL, &hKey, NULL) == ERROR_SUCCESS) {
+        RegSetValueExA(hKey, name, 0, REG_DWORD, 
+            reinterpret_cast<const BYTE*>(&val), sizeof(val));
+        RegCloseKey(hKey);
+    }
+}
+
+void LoadDSPSettingsFromRegistry() {
+    HKEY hKey;
+    if (RegOpenKeyExA(HKEY_CURRENT_USER, "Software\\iPhoneMic", 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+        DWORD dwVal = 0;
+        DWORD dwSize = sizeof(dwVal);
+        if (RegQueryValueExA(hKey, "GainPercent", NULL, NULL, reinterpret_cast<LPBYTE>(&dwVal), &dwSize) == ERROR_SUCCESS) {
+            g_Dsp.set_gain_percent(static_cast<int>(dwVal));
+        }
+        dwSize = sizeof(dwVal);
+        if (RegQueryValueExA(hKey, "IsMuted", NULL, NULL, reinterpret_cast<LPBYTE>(&dwVal), &dwSize) == ERROR_SUCCESS) {
+            g_Dsp.set_muted(dwVal != 0);
+        }
+        dwSize = sizeof(dwVal);
+        if (RegQueryValueExA(hKey, "HighPassFilter", NULL, NULL, reinterpret_cast<LPBYTE>(&dwVal), &dwSize) == ERROR_SUCCESS) {
+            g_Dsp.set_high_pass_filter(dwVal != 0);
+        }
+        dwSize = sizeof(dwVal);
+        if (RegQueryValueExA(hKey, "AGC", NULL, NULL, reinterpret_cast<LPBYTE>(&dwVal), &dwSize) == ERROR_SUCCESS) {
+            g_Dsp.set_agc(dwVal != 0);
+        }
+        dwSize = sizeof(dwVal);
+        if (RegQueryValueExA(hKey, "NoiseGate", NULL, NULL, reinterpret_cast<LPBYTE>(&dwVal), &dwSize) == ERROR_SUCCESS) {
+            g_Dsp.set_noise_gate(static_cast<int>(dwVal));
+        }
         RegCloseKey(hKey);
     }
 }
@@ -216,6 +257,9 @@ void BackgroundUSBThread() {
                 std::vector<iphone_mic::AudioFrame> audioFrames;
                 iphone_mic::audio_convert::pcm16_to_audio_frames(payload.data(), payload.size(), g_AudioChannels.load(), audioFrames);
                 
+                // Apply DSP Pipeline (80Hz HPF, Noise Gate, Gain, AGC / Limiter)
+                g_Dsp.process(audioFrames.data(), audioFrames.size());
+
                 float maxL = 0.0f;
                 float maxR = 0.0f;
                 
@@ -230,7 +274,10 @@ void BackgroundUSBThread() {
 
                 // Push to playback buffer if monitoring
                 if (g_MonitorAudio && g_AudioRingBuffer) {
-                    g_AudioRingBuffer->write(audioFrames.data(), audioFrames.size());
+                    size_t written = g_AudioRingBuffer->write(audioFrames.data(), audioFrames.size());
+                    if (written < audioFrames.size()) {
+                        g_DroppedFrames += (audioFrames.size() - written);
+                    }
                 }
                 
             } else if (header.magic == PROTOCOL_MAGIC && header.type == static_cast<uint16_t>(PacketType::Config)) {
@@ -271,7 +318,7 @@ void BackgroundUSBThread() {
 }
 
 // ============================================================================
-// EXPORTED C FUNCTIONS FOR WPF
+// EXPORTED C FUNCTIONS
 // ============================================================================
 
 EXPORT void Backend_Init() {
@@ -284,8 +331,9 @@ EXPORT void Backend_Init() {
     // Initialize audio ring buffer
     g_AudioRingBuffer = std::make_unique<RingBuffer<iphone_mic::AudioFrame>>(96000);
     
-    // Load saved device preference
+    // Load saved device preference and DSP settings
     LoadOutputDeviceFromRegistry();
+    LoadDSPSettingsFromRegistry();
 
     // Enumerate and initialize audio output device
     EnumerateOutputDevices();
@@ -364,6 +412,58 @@ EXPORT bool Backend_GetConnectionStatus() {
 EXPORT void Backend_GetAudioLevels(float* left, float* right) {
     if (left) *left = g_PeakL.load();
     if (right) *right = g_PeakR.load();
+}
+
+// DSP Controls
+EXPORT void Backend_SetGainPercent(int percent) {
+    g_Dsp.set_gain_percent(percent);
+    SaveDWORDToRegistry("GainPercent", static_cast<DWORD>(percent));
+}
+
+EXPORT void Backend_SetMuted(bool mute) {
+    g_Dsp.set_muted(mute);
+    SaveDWORDToRegistry("IsMuted", mute ? 1 : 0);
+}
+
+EXPORT void Backend_SetHighPassFilter(bool enable) {
+    g_Dsp.set_high_pass_filter(enable);
+    SaveDWORDToRegistry("HighPassFilter", enable ? 1 : 0);
+}
+
+EXPORT void Backend_SetAGC(bool enable) {
+    g_Dsp.set_agc(enable);
+    SaveDWORDToRegistry("AGC", enable ? 1 : 0);
+}
+
+EXPORT void Backend_SetNoiseGate(int level) {
+    g_Dsp.set_noise_gate(level);
+    SaveDWORDToRegistry("NoiseGate", static_cast<DWORD>(level));
+}
+
+EXPORT void Backend_SetBufferSize(int size) {
+    SaveDWORDToRegistry("BufferSize", static_cast<DWORD>(size));
+}
+
+EXPORT uint64_t Backend_GetDroppedFrames() {
+    return g_DroppedFrames.load();
+}
+
+EXPORT int Backend_GetSampleRate() {
+    if (g_AudioDeviceReady) {
+        return static_cast<int>(g_AudioDevice.sampleRate);
+    }
+    return 0;
+}
+
+EXPORT int Backend_GetBufferSize() {
+    HKEY hKey;
+    DWORD dwVal = 0;
+    DWORD dwSize = sizeof(dwVal);
+    if (RegOpenKeyExA(HKEY_CURRENT_USER, "Software\\iPhoneMic", 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+        RegQueryValueExA(hKey, "BufferSize", NULL, NULL, reinterpret_cast<LPBYTE>(&dwVal), &dwSize);
+        RegCloseKey(hKey);
+    }
+    return static_cast<int>(dwVal);
 }
 
 // Main DLL entry point
