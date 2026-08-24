@@ -46,6 +46,25 @@ inline DWORD get_dword(const char* name, DWORD default_val) {
     return default_val;
 }
 
+inline bool save_int32(const char* name, int32_t val) {
+    return save_dword(name, static_cast<DWORD>(val));
+}
+
+inline bool load_int32(const char* name, int32_t& val) {
+    DWORD dw = 0;
+    if (load_dword(name, dw)) {
+        val = static_cast<int32_t>(dw);
+        return true;
+    }
+    return false;
+}
+
+inline int32_t get_int32(const char* name, int32_t default_val) {
+    int32_t val = default_val;
+    if (load_int32(name, val)) return val;
+    return default_val;
+}
+
 inline bool save_string(const char* name, const std::string& str) {
     HKEY hKey;
     if (RegCreateKeyExA(HKEY_CURRENT_USER, REG_SUBKEY, 0, NULL, 

@@ -20,4 +20,5 @@
 # Other
 /scripts/build/
 /dist/
+/dist-installer/
 *.zip

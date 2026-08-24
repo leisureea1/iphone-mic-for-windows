@@ -88,9 +88,15 @@ void test_adaptive_resampler() {
     assert(output[0].left == 0.5f);
     assert(output[0].right == -0.5f);
 
-    // Test ratio update
-    resampler.update_ratio(0.6, 0.5);
+    // Test drift update: buffer cushion higher than target -> ratio > 1.0 (consume faster)
+    resampler.update_drift(600, 500);
     assert(resampler.current_ratio() > 1.0);
+
+    // Test drift update: buffer cushion lower than target -> ratio < 1.0 (consume slower)
+    for (int i = 0; i < 50; ++i) {
+        resampler.update_drift(300, 500);
+    }
+    assert(resampler.current_ratio() < 1.0);
 
     std::cout << "  test_adaptive_resampler: PASSED\n";
 }

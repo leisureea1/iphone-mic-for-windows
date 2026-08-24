@@ -166,8 +166,9 @@ private:
     // Error message
     char error_message_[256] = {};
     
-    // ASRC: Adaptive resampler for clock drift compensation
+    // ASRC: Adaptive resamplers for clock drift compensation (input & output)
     AdaptiveResampler resampler_;
+    AdaptiveResampler output_resampler_;
     
     // DSP Pipeline (HPF, Noise Gate, Gain, AGC Limiter)
     AudioDSPPipeline dsp_;
@@ -181,11 +182,16 @@ private:
     std::vector<AudioFrame> work_raw_input_;
     std::vector<AudioFrame> work_resampled_;
     std::vector<AudioFrame> work_output_frames_;
+    std::vector<AudioFrame> work_playback_raw_;
     std::vector<AudioFrame> usb_audio_frames_;
+    
+    // Cached high-resolution timer frequency
+    int64_t qpc_frequency_ = 0;
     
     // Latency compensation offset (samples)
     long record_offset_samples_ = 0;
     bool is_prebuffered_ = false;
+    int consecutive_underruns_ = 0;
 
     // Private methods
     void start_usb_client();

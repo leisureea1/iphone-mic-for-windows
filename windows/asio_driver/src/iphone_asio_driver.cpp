@@ -56,17 +56,10 @@ iPhoneAsioDriver::~iPhoneAsioDriver() {
 
 HRESULT STDMETHODCALLTYPE iPhoneAsioDriver::QueryInterface(REFIID riid, void** ppv) {
     if (!ppv) return E_POINTER;
-    
     *ppv = nullptr;
     
-    if (IsEqualIID(riid, IID_IUnknown)) {
-        *ppv = static_cast<IUnknown*>(this);
-    } else {
-        // ASIO uses a custom interface, not a standard COM IID
+    if (IsEqualIID(riid, IID_IUnknown) || IsEqualIID(riid, CLSID_iPhoneAsioDriver)) {
         *ppv = static_cast<IASIO*>(this);
-    }
-    
-    if (*ppv) {
         AddRef();
         return S_OK;
     }
@@ -94,6 +87,11 @@ ASIOBool iPhoneAsioDriver::init(void* sysHandle) {
     if (initialized_) return ASIOTrue;
     
     sys_handle_ = static_cast<HWND>(sysHandle);
+    
+    // Cache high-resolution timer frequency
+    LARGE_INTEGER freq;
+    QueryPerformanceFrequency(&freq);
+    qpc_frequency_ = freq.QuadPart;
     
     // Start USB client to receive audio from iPhone
     start_usb_client();
@@ -129,17 +127,25 @@ ASIOError iPhoneAsioDriver::start() {
     sample_position_.store(0);
     current_buffer_index_ = 0;
     is_prebuffered_ = false;
+    consecutive_underruns_ = 0;
     
     // Reset ASRC & DSP state
     resampler_.reset();
+    output_resampler_.reset();
     dsp_.reset();
     load_dsp_settings_from_registry();
     update_latency_offset_from_registry();
     
     // Drain any extreme backlog if needed
-    if (input_ring_buffer_ && input_ring_buffer_->available_read() > static_cast<size_t>(buffer_size_ * 8)) {
-        input_ring_buffer_->drain_to_latest(static_cast<size_t>(buffer_size_ * 3));
+    if (input_ring_buffer_ && input_ring_buffer_->available_read() > 2048) {
+        input_ring_buffer_->drain_to_latest(768);
     }
+    if (output_ring_buffer_) {
+        output_ring_buffer_->drain_all();
+    }
+    
+    // Fix startup race condition: set running_ before launching threads
+    running_ = true;
     
     // Start output playback engine
     start_playback_engine();
@@ -147,7 +153,6 @@ ASIOError iPhoneAsioDriver::start() {
     // Start the timer that drives buffer callbacks
     start_timer();
     
-    running_ = true;
     return ASE_OK;
 }
 
@@ -178,10 +183,44 @@ static void asio_playback_data_callback(ma_device* pDevice, void* pOutput, const
 }
 
 size_t iPhoneAsioDriver::read_output_buffer(AudioFrame* out, size_t frames) {
-    if (output_ring_buffer_) {
-        return output_ring_buffer_->read(out, frames);
+    if (!output_ring_buffer_ || !out || frames == 0) return 0;
+    
+    size_t available = output_ring_buffer_->available_read();
+    size_t target_cushion = static_cast<size_t>(buffer_size_ > 0 ? buffer_size_ * 2 : 256);
+    
+    // Drain excessive backlog if DAW output accumulates (> 6 buffers)
+    if (available > target_cushion * 3) {
+        output_ring_buffer_->drain_to_latest(target_cushion);
+        available = target_cushion;
     }
-    return 0;
+    
+    if (available >= frames) {
+        // Apply output ASRC drift tracking
+        output_resampler_.update_drift(available, target_cushion);
+        
+        size_t max_input_needed = static_cast<size_t>(frames * 1.02) + 4;
+        if (work_playback_raw_.size() < max_input_needed) {
+            work_playback_raw_.resize(max_input_needed, {0.0f, 0.0f});
+        }
+        
+        size_t peek_count = output_ring_buffer_->peek(work_playback_raw_.data(), max_input_needed);
+        size_t consumed = output_resampler_.process(work_playback_raw_.data(), peek_count, out, frames);
+        output_ring_buffer_->advance_read(consumed);
+        return frames;
+    } else if (available > 0) {
+        output_ring_buffer_->read(out, available);
+        AudioFrame last = out[available - 1];
+        size_t missing = frames - available;
+        for (size_t i = 0; i < missing; ++i) {
+            float fade = 1.0f - static_cast<float>(i + 1) / static_cast<float>(missing);
+            out[available + i].left = last.left * fade;
+            out[available + i].right = last.right * fade;
+        }
+        return frames;
+    } else {
+        std::memset(out, 0, frames * sizeof(AudioFrame));
+        return 0;
+    }
 }
 
 void iPhoneAsioDriver::start_playback_engine() {
@@ -274,13 +313,14 @@ ASIOError iPhoneAsioDriver::getLatencies(long* inputLatency, long* outputLatency
     
     // Total physical input latency calculation:
     // 1. ASIO buffer period: buffer_size_
-    // 2. Ring buffer target cushion: buffer_size_ * 2
+    // 2. Ring buffer target cushion: max(buffer_size_ * 3, 768)
     // 3. iOS hardware capture buffer (AVAudioEngine IOBuffer @ 48kHz, ~128-256 samples): ~256 samples
     // 4. Lookahead Limiter latency: 48 samples (1ms) if limiter enabled, else 0
     // 5. User offset from registry (RecordOffsetSamples)
     long limiter_delay = dsp_.is_limiter_enabled() ? 48 : 0;
     long ios_capture_delay = 256; // ~5.3ms default on iOS
-    long base_input_latency = buffer_size_ * 3 + ios_capture_delay + limiter_delay;
+    size_t target_cushion = std::max<size_t>(static_cast<size_t>(buffer_size_ * 3), static_cast<size_t>(768));
+    long base_input_latency = static_cast<long>(buffer_size_ + target_cushion + ios_capture_delay + limiter_delay);
     
     // Add user configured fine-tuning offset (can be positive or negative, clamped to >= buffer_size_)
     long total_in = base_input_latency + record_offset_samples_;
@@ -378,12 +418,11 @@ ASIOError iPhoneAsioDriver::getSamplePosition(ASIOSamples* sPos,
     sPos->hi = static_cast<unsigned long>(pos >> 32);
     sPos->lo = static_cast<unsigned long>(pos & 0xFFFFFFFF);
     
-    // System time in nanoseconds (using QPC)
-    LARGE_INTEGER freq, count;
-    QueryPerformanceFrequency(&freq);
+    // System time in nanoseconds (using cached QPC frequency)
+    LARGE_INTEGER count;
     QueryPerformanceCounter(&count);
-    double seconds = static_cast<double>(count.QuadPart) / 
-                     static_cast<double>(freq.QuadPart);
+    double freq = (qpc_frequency_ > 0) ? static_cast<double>(qpc_frequency_) : 1e7;
+    double seconds = static_cast<double>(count.QuadPart) / freq;
     uint64_t sysTimeNs = static_cast<uint64_t>(seconds * 1e9);
     tStamp->hi = static_cast<unsigned long>(sysTimeNs >> 32);
     tStamp->lo = static_cast<unsigned long>(sysTimeNs & 0xFFFFFFFF);
@@ -593,7 +632,7 @@ ASIOError iPhoneAsioDriver::future(long selector, void* opt) {
 }
 
 ASIOError iPhoneAsioDriver::outputReady() {
-    // We have no outputs, but return OK
+    // Host has completed output writing for this buffer switch
     return ASE_OK;
 }
 
@@ -624,8 +663,7 @@ void iPhoneAsioDriver::usb_client_thread_func() {
     
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
     
-    PacketParser parser;
-    std::vector<uint8_t> recv_buffer(65536);
+    std::vector<uint8_t> payload_buf(65536);
     
     while (usb_client_running_.load()) {
         // Connect directly to iPhone via built-in usbmuxd protocol.
@@ -635,61 +673,86 @@ void iPhoneAsioDriver::usb_client_thread_func() {
             continue;
         }
         
-        // Set receive timeout
+        // Set receive timeout and TCP optimizations
         DWORD timeout = 500;
         setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO,
                    reinterpret_cast<const char*>(&timeout), sizeof(timeout));
         
-        // Receive loop
-        parser.reset();
+        int flag = 1;
+        setsockopt(sock, IPPROTO_TCP, TCP_NODELAY,
+                   reinterpret_cast<const char*>(&flag), sizeof(flag));
+        
+        int rcvbuf = 65536;
+        setsockopt(sock, SOL_SOCKET, SO_RCVBUF,
+                   reinterpret_cast<const char*>(&rcvbuf), sizeof(rcvbuf));
+        
         int current_channels = 1;
         
         while (usb_client_running_.load()) {
-            int bytes = recv(sock, reinterpret_cast<char*>(recv_buffer.data()),
-                            static_cast<int>(recv_buffer.size()), 0);
-            
-            if (bytes > 0) {
-                parser.feed(recv_buffer.data(), static_cast<size_t>(bytes));
-                
-                PacketParser::ParsedPacket packet;
-                while (parser.try_parse(packet)) {
-                    if (packet.header.packet_type() == PacketType::AudioData) {
-                        // Convert PCM16 to Float32 AudioFrames (reusing preallocated buffer)
-                        audio_convert::pcm16_to_audio_frames(packet.payload.data(), packet.payload.size(), current_channels, usb_audio_frames_);
-                        
-                        // Write to ring buffer
-                        if (input_ring_buffer_) {
-                            input_ring_buffer_->write(usb_audio_frames_.data(), usb_audio_frames_.size());
-                        }
-                    } else if (packet.header.packet_type() == PacketType::Config) {
-                        std::string json(packet.payload.begin(), packet.payload.end());
-                        auto cfg = AudioConfig::from_json(json);
-                        if (cfg && cfg->channels > 0) {
-                            current_channels = cfg->channels;
-                        }
-                        
-                        // Send ACK back
-                        auto ack = iphone_mic::packet::build_config_ack();
-                        send(sock, reinterpret_cast<const char*>(ack.data()),
-                             static_cast<int>(ack.size()), 0);
-                    } else if (packet.header.packet_type() == PacketType::Heartbeat) {
-                        // Respond
-                        auto hb = iphone_mic::packet::build_heartbeat();
-                        send(sock, reinterpret_cast<const char*>(hb.data()),
-                             static_cast<int>(hb.size()), 0);
-                    }
-                }
-            } else if (bytes == 0) {
-                break;  // Disconnected
-            } else {
+            PacketHeader header;
+            int ret = recv(sock, reinterpret_cast<char*>(&header), sizeof(header), MSG_WAITALL);
+            if (ret != sizeof(header)) {
                 int err = WSAGetLastError();
                 if (err == WSAETIMEDOUT) continue;
-                break;  // Error
+                break;
+            }
+            
+            if (header.magic != PROTOCOL_MAGIC) {
+                // Out of sync - break to reconnect
+                break;
+            }
+            
+            if (header.type == static_cast<uint16_t>(PacketType::AudioData)) {
+                if (payload_buf.size() < header.payload_size) {
+                    payload_buf.resize(header.payload_size);
+                }
+                ret = recv(sock, reinterpret_cast<char*>(payload_buf.data()), header.payload_size, MSG_WAITALL);
+                if (ret != static_cast<int>(header.payload_size)) {
+                    int err = WSAGetLastError();
+                    if (err == WSAETIMEDOUT) continue;
+                    break;
+                }
+                
+                audio_convert::pcm16_to_audio_frames(payload_buf.data(), header.payload_size, current_channels, usb_audio_frames_);
+                if (input_ring_buffer_) {
+                    input_ring_buffer_->write(usb_audio_frames_.data(), usb_audio_frames_.size());
+                }
+            } else if (header.type == static_cast<uint16_t>(PacketType::Config)) {
+                if (payload_buf.size() < header.payload_size) {
+                    payload_buf.resize(header.payload_size);
+                }
+                ret = recv(sock, reinterpret_cast<char*>(payload_buf.data()), header.payload_size, MSG_WAITALL);
+                if (ret != static_cast<int>(header.payload_size)) {
+                    int err = WSAGetLastError();
+                    if (err == WSAETIMEDOUT) continue;
+                    break;
+                }
+                
+                std::string json(payload_buf.data(), payload_buf.data() + header.payload_size);
+                auto cfg = AudioConfig::from_json(json);
+                if (cfg && cfg->channels > 0) {
+                    current_channels = cfg->channels;
+                }
+                
+                // Send ACK back
+                auto ack = iphone_mic::packet::build_config_ack();
+                send(sock, reinterpret_cast<const char*>(ack.data()),
+                     static_cast<int>(ack.size()), 0);
+            } else if (header.type == static_cast<uint16_t>(PacketType::Heartbeat)) {
+                auto hb = iphone_mic::packet::build_heartbeat();
+                send(sock, reinterpret_cast<const char*>(hb.data()),
+                     static_cast<int>(hb.size()), 0);
+            } else {
+                if (header.payload_size > 0) {
+                    if (payload_buf.size() < header.payload_size) {
+                        payload_buf.resize(header.payload_size);
+                    }
+                    recv(sock, reinterpret_cast<char*>(payload_buf.data()), header.payload_size, MSG_WAITALL);
+                }
             }
         }
         
         closesocket(sock);
-        parser.reset();
         
         // Brief delay before reconnect
         if (usb_client_running_.load()) {
@@ -729,9 +792,9 @@ void iPhoneAsioDriver::timer_thread_func() {
     
     // Calculate callback interval based on buffer size and sample rate
     double interval_ms = (static_cast<double>(buffer_size_) / sample_rate_) * 1000.0;
+    double freq = (qpc_frequency_ > 0) ? static_cast<double>(qpc_frequency_) : 1e7;
     
-    LARGE_INTEGER freq, start, now;
-    QueryPerformanceFrequency(&freq);
+    LARGE_INTEGER start, now;
     QueryPerformanceCounter(&start);
     
     int64_t callback_count = 0;
@@ -746,18 +809,18 @@ void iPhoneAsioDriver::timer_thread_func() {
         process_audio_buffer();
         
         // Precise wait until next callback time
-        while (true) {
+        while (timer_running_.load() && running_) {
             QueryPerformanceCounter(&now);
             double elapsed_ms = static_cast<double>(now.QuadPart - start.QuadPart) 
-                               / static_cast<double>(freq.QuadPart) * 1000.0;
+                               / freq * 1000.0;
             
             double remaining = target_time_ms - elapsed_ms;
             
             if (remaining <= 0.0) break;
             
-            if (remaining > 1.2) {
+            if (remaining > 2.0) {
                 Sleep(1);
-            } else if (remaining > 0.3) {
+            } else if (remaining > 0.5) {
                 SwitchToThread();
             } else {
                 YieldProcessor();
@@ -779,8 +842,9 @@ void iPhoneAsioDriver::process_audio_buffer() {
     size_t frames_needed = static_cast<size_t>(buffer_size_);
     
     // Ensure work buffers have sufficient capacity
-    if (work_raw_input_.size() < frames_needed + 4) {
-        work_raw_input_.resize(frames_needed + 4, {0.0f, 0.0f});
+    size_t max_input_needed = static_cast<size_t>(frames_needed * 1.02) + 8;
+    if (work_raw_input_.size() < max_input_needed) {
+        work_raw_input_.resize(max_input_needed, {0.0f, 0.0f});
     }
     if (work_resampled_.size() < frames_needed) {
         work_resampled_.resize(frames_needed, {0.0f, 0.0f});
@@ -797,42 +861,57 @@ void iPhoneAsioDriver::process_audio_buffer() {
     }
 
     // ==========================================
-    // 1. Process INPUT (iPhone -> DAW)
+    // 1. Process INPUT (iPhone -> RingBuffer -> ASRC -> DSP -> ASIO Buffer)
     // ==========================================
     
-    bool has_audio = false;
     if (input_ring_buffer_) {
-        // High watermark anti-backlog: only trim if excessive backlog accumulates (> 10 buffers / ~80ms)
-        size_t max_backlog = static_cast<size_t>(buffer_size_ * 10);
+        // Target cushion must safely absorb iOS CoreAudio burst deliveries (512 ~ 1024 frames)
+        size_t target_cushion = std::max<size_t>(static_cast<size_t>(buffer_size_ * 3), static_cast<size_t>(768));
+        size_t max_backlog = target_cushion + 1536;
+        
+        // High watermark anti-backlog: only drain if severe sustained network backlog (> 48ms)
         if (input_ring_buffer_->available_read() > max_backlog) {
-            input_ring_buffer_->drain_to_latest(static_cast<size_t>(buffer_size_ * 3));
+            input_ring_buffer_->drain_to_latest(target_cushion);
         }
 
-        // Jitter prebuffering cushion (requires 3 buffer periods ~ 16ms to start streaming)
-        size_t min_cushion = static_cast<size_t>(buffer_size_ * 3);
+        // Initial jitter prebuffering cushion (~16ms cushion before starting playback stream)
         if (!is_prebuffered_) {
-            if (input_ring_buffer_->available_read() >= min_cushion) {
+            if (input_ring_buffer_->available_read() >= target_cushion) {
                 is_prebuffered_ = true;
+                consecutive_underruns_ = 0;
             }
         }
 
         if (is_prebuffered_) {
             size_t available = input_ring_buffer_->available_read();
+            
             if (available >= frames_needed) {
-                size_t read_count = input_ring_buffer_->read(work_resampled_.data(), frames_needed);
-                if (read_count < frames_needed) {
-                    std::memset(work_resampled_.data() + read_count, 0, (frames_needed - read_count) * sizeof(AudioFrame));
+                // Adaptive Resampling: dynamically micro-adjust sample consumption to maintain target cushion
+                resampler_.update_drift(available, target_cushion);
+                
+                size_t peek_count = input_ring_buffer_->peek(work_raw_input_.data(), max_input_needed);
+                size_t consumed = resampler_.process(work_raw_input_.data(), peek_count, 
+                                                    work_resampled_.data(), frames_needed);
+                input_ring_buffer_->advance_read(consumed);
+                consecutive_underruns_ = 0;
+            } else if (available > 0) {
+                // Partial read: read available frames, smoothly fade remainder to zero without click
+                input_ring_buffer_->read(work_resampled_.data(), available);
+                AudioFrame last_frame = work_resampled_[available - 1];
+                size_t missing = frames_needed - available;
+                for (size_t i = 0; i < missing; ++i) {
+                    float fade = 1.0f - static_cast<float>(i + 1) / static_cast<float>(missing);
+                    work_resampled_[available + i].left = last_frame.left * fade;
+                    work_resampled_[available + i].right = last_frame.right * fade;
+                }
+                consecutive_underruns_ = 0;
+            } else {
+                // Temporary underrun: fill current buffer with silence
+                std::memset(work_resampled_.data(), 0, frames_needed * sizeof(AudioFrame));
+                consecutive_underruns_++;
+                if (consecutive_underruns_ > 30) {
                     is_prebuffered_ = false;
                 }
-                has_audio = true;
-            } else if (available > 0) {
-                size_t read_count = input_ring_buffer_->read(work_resampled_.data(), available);
-                std::memset(work_resampled_.data() + read_count, 0, (frames_needed - read_count) * sizeof(AudioFrame));
-                is_prebuffered_ = false;
-                has_audio = true;
-            } else {
-                std::memset(work_resampled_.data(), 0, frames_needed * sizeof(AudioFrame));
-                is_prebuffered_ = false;
             }
         } else {
             std::memset(work_resampled_.data(), 0, frames_needed * sizeof(AudioFrame));
@@ -841,10 +920,8 @@ void iPhoneAsioDriver::process_audio_buffer() {
         std::memset(work_resampled_.data(), 0, frames_needed * sizeof(AudioFrame));
     }
 
-    if (has_audio) {
-        // Apply Audio DSP Pipeline (80Hz HPF Low-Cut, Noise Gate, Gain, AGC / Limiter)
-        dsp_.process(work_resampled_.data(), frames_needed);
-    }
+    // Always run DSP pipeline so biquad filters and dynamic processors remain smooth
+    dsp_.process(work_resampled_.data(), frames_needed);
     
     // De-interleave into per-channel ASIO buffers (Int32 format with strict clamping)
     for (long ch_idx = 0; ch_idx < num_active_channels_; ++ch_idx) {
@@ -860,12 +937,12 @@ void iPhoneAsioDriver::process_audio_buffer() {
         if (src_channel == 0) { // Left
             for (long s = 0; s < buffer_size_; ++s) {
                 float sample = std::clamp(work_resampled_[s].left, -1.0f, 1.0f);
-                dst[s] = static_cast<int32_t>(sample * 2147483520.0f);
+                dst[s] = static_cast<int32_t>(sample * 2147483647.0f);
             }
         } else if (src_channel == 1) { // Right
             for (long s = 0; s < buffer_size_; ++s) {
                 float sample = std::clamp(work_resampled_[s].right, -1.0f, 1.0f);
-                dst[s] = static_cast<int32_t>(sample * 2147483520.0f);
+                dst[s] = static_cast<int32_t>(sample * 2147483647.0f);
             }
         } else {
             std::memset(dst, 0, frames_needed * sizeof(int32_t));
@@ -881,17 +958,17 @@ void iPhoneAsioDriver::process_audio_buffer() {
     if (callbacks_->bufferSwitchTimeInfo) {
         ASIOTime time{};
         uint64_t pos = sample_position_.load();
+        time.timeInfo.speed = 1.0;
+        time.timeInfo.sampleRate = sample_rate_;
+        time.timeInfo.flags = kSystemTimeValid | kSamplePositionValid | kSampleRateValid | kSpeedValid;
         time.timeInfo.samplePosition.hi = static_cast<unsigned long>(pos >> 32);
         time.timeInfo.samplePosition.lo = static_cast<unsigned long>(pos & 0xFFFFFFFF);
-        time.timeInfo.sampleRate = sample_rate_;
-        time.timeInfo.flags = 0x03;  // kSystemTimeValid | kSamplePositionValid
         
-        LARGE_INTEGER freq, count;
-        QueryPerformanceFrequency(&freq);
+        LARGE_INTEGER count;
         QueryPerformanceCounter(&count);
+        double freq = (qpc_frequency_ > 0) ? static_cast<double>(qpc_frequency_) : 1e7;
         uint64_t sysTimeNs = static_cast<uint64_t>(
-            static_cast<double>(count.QuadPart) / 
-            static_cast<double>(freq.QuadPart) * 1e9
+            static_cast<double>(count.QuadPart) / freq * 1e9
         );
         time.timeInfo.systemTime.hi = static_cast<unsigned long>(sysTimeNs >> 32);
         time.timeInfo.systemTime.lo = static_cast<unsigned long>(sysTimeNs & 0xFFFFFFFF);
@@ -957,9 +1034,9 @@ void iPhoneAsioDriver::load_dsp_settings_from_registry() {
 }
 
 void iPhoneAsioDriver::update_latency_offset_from_registry() {
-    DWORD dwVal = 0;
-    if (registry::load_dword("RecordOffsetSamples", dwVal)) {
-        record_offset_samples_ = static_cast<long>(dwVal);
+    int32_t val = 0;
+    if (registry::load_int32("RecordOffsetSamples", val)) {
+        record_offset_samples_ = static_cast<long>(val);
     } else {
         record_offset_samples_ = 0;
     }

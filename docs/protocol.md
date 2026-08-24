@@ -64,29 +64,30 @@ Windows (TCP Client → 127.0.0.1:8730 via iproxy)
 | 参数 | 值 |
 |------|------|
 | 采样率 | 48,000 Hz |
-| 位深 | 24-bit signed integer |
+| 位深 | 16-bit signed integer (Little-Endian) |
 | 字节序 | Little-Endian |
 | 声道 | 1 (Mono) 或 2 (Stereo) |
 | 交织方式 | Interleaved (L R L R ...) |
-| 每采样字节数 | 3 |
-| 每帧字节数 | 3 × channels |
+| 每采样字节数 | 2 |
+| 每帧字节数 | 2 × channels |
+| ASIO 输出映射 | 驱动内部映射至 32-bit signed int (`ASIOSTInt32LSB`) |
 
 ### 采样值范围
 
 | 值 | 含义 |
 |----|------|
-| `0x7FFFFF` (+8,388,607) | 最大正值 |
-| `0x000000` (0) | 静音 |
-| `0x800000` (-8,388,608) | 最大负值 |
+| `0x7FFF` (+32,767) | 最大正值 |
+| `0x0000` (0) | 静音 |
+| `0x8000` (-32,768) | 最大负值 |
 
 ### 典型 Payload 大小
 
-| Buffer Size | Mono | Stereo |
-|-------------|------|--------|
-| 64 samples | 192 bytes | 384 bytes |
-| 128 samples | 384 bytes | 768 bytes |
-| 256 samples | 768 bytes | 1,536 bytes |
-| 512 samples | 1,536 bytes | 3,072 bytes |
+| Buffer Size | Mono (1 ch) | Stereo (2 ch) |
+|-------------|-------------|---------------|
+| 64 samples  | 128 bytes   | 256 bytes     |
+| 128 samples | 256 bytes   | 512 bytes     |
+| 256 samples | 512 bytes   | 1,024 bytes   |
+| 512 samples | 1,024 bytes | 2,048 bytes   |
 
 ## Config 帧
 
@@ -95,7 +96,7 @@ Windows (TCP Client → 127.0.0.1:8730 via iproxy)
 ```json
 {
     "sampleRate": 48000,
-    "bitDepth": 24,
+    "bitDepth": 16,
     "channels": 1,
     "bufferSize": 256
 }

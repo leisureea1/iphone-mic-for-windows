@@ -147,11 +147,22 @@ void data_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma_uin
             }
         }
         
-        size_t framesRead = g_AudioRingBuffer->read(reinterpret_cast<iphone_mic::AudioFrame*>(pOutput), frameCount);
-        if (framesRead < frameCount) {
-            // Fill remainder with zeros (silence) to avoid audio glitches
-            std::memset(reinterpret_cast<iphone_mic::AudioFrame*>(pOutput) + framesRead, 0, (frameCount - framesRead) * sizeof(iphone_mic::AudioFrame));
-            g_IsPrebuffered = false; // Re-enter prebuffering mode due to underrun
+        size_t available = g_AudioRingBuffer->available_read();
+        iphone_mic::AudioFrame* outPtr = reinterpret_cast<iphone_mic::AudioFrame*>(pOutput);
+        
+        if (available >= frameCount) {
+            g_AudioRingBuffer->read(outPtr, frameCount);
+        } else if (available > 0) {
+            g_AudioRingBuffer->read(outPtr, available);
+            iphone_mic::AudioFrame last = outPtr[available - 1];
+            size_t missing = frameCount - available;
+            for (size_t i = 0; i < missing; ++i) {
+                float fade = 1.0f - static_cast<float>(i + 1) / static_cast<float>(missing);
+                outPtr[available + i].left = last.left * fade;
+                outPtr[available + i].right = last.right * fade;
+            }
+        } else {
+            std::memset(outPtr, 0, frameCount * sizeof(iphone_mic::AudioFrame));
         }
     } else {
         std::memset(pOutput, 0, frameCount * sizeof(iphone_mic::AudioFrame));

@@ -2,8 +2,8 @@
 // iPhoneMic
 //
 // Studio-Grade Realtime Audio Interface for iPhone USB Microphone.
-// Designed with Obsidian Dark Mode, Frosted Glassmorphism, Dynamic VU Meters,
-// and Live Transmission Telemetry.
+// Designed with Obsidian Dark Mode, Frosted Glassmorphism, Dynamic Peak-Hold VU Meters,
+// CoreAudio RemoteIO Engine Telemetry, and Tactile Haptics.
 
 import SwiftUI
 import AVFoundation
@@ -19,6 +19,12 @@ struct ContentView: View {
     @State private var sessionSeconds: Int = 0
     @State private var sessionTimer: Timer?
     @State private var isPulsing = false
+    
+    // Peak Hold State for Studio Meters
+    @State private var peakHoldLeft: Float = -160.0
+    @State private var peakHoldRight: Float = -160.0
+    @State private var peakHoldTimerLeft: Timer?
+    @State private var peakHoldTimerRight: Timer?
     
     var body: some View {
         ZStack {
@@ -37,7 +43,7 @@ struct ContentView: View {
                         // Dynamic Status Hero Card
                         statusHeroCard
                         
-                        // Professional Studio VU Level Meter
+                        // Professional Studio VU Level Meter with Peak Hold
                         studioVUMeterCard
                         
                         // Quick Settings Deck (Channel & Buffer)
@@ -83,6 +89,9 @@ struct ContentView: View {
                 stopSessionTimer()
             }
         }
+        .onChange(of: viewModel.peakLevel) { newPeak in
+            updatePeakHold(newPeak: newPeak)
+        }
         .onAppear {
             withAnimation(.easeInOut(duration: 2.0).repeatForever(autoreverses: true)) {
                 isPulsing = true
@@ -95,27 +104,27 @@ struct ContentView: View {
     private var backgroundLayer: some View {
         ZStack {
             // Pure Obsidian Base
-            Color(hex: "080811").ignoresSafeArea()
+            Color(hex: "070710").ignoresSafeArea()
             
             // Top Right Violet Ambient Glow
             RadialGradient(
-                colors: [Color(hex: "4f46e5").opacity(viewModel.isStreaming ? 0.35 : 0.18), Color.clear],
+                colors: [Color(hex: "4f46e5").opacity(viewModel.isStreaming ? 0.38 : 0.20), Color.clear],
                 center: .topTrailing,
                 startRadius: 20,
-                endRadius: 360
+                endRadius: 380
             )
             .ignoresSafeArea()
             
             // Bottom Left Cyan Ambient Glow
             RadialGradient(
-                colors: [Color(hex: "06b6d4").opacity(viewModel.isStreaming ? 0.25 : 0.12), Color.clear],
+                colors: [Color(hex: "06b6d4").opacity(viewModel.isStreaming ? 0.28 : 0.14), Color.clear],
                 center: .bottomLeading,
                 startRadius: 40,
-                endRadius: 420
+                endRadius: 440
             )
             .ignoresSafeArea()
             
-            // Subtle Grid Overlay for Studio Hardware Feel
+            // Subtle Architectural Grid Overlay
             GeometryReader { geo in
                 Path { path in
                     let step: CGFloat = 32
@@ -137,28 +146,37 @@ struct ContentView: View {
             // Brand Logo & Title
             HStack(spacing: 10) {
                 ZStack {
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    RoundedRectangle(cornerRadius: 11, style: .continuous)
                         .fill(LinearGradient(
                             colors: [Color(hex: "6366f1"), Color(hex: "8b5cf6")],
                             startPoint: .topLeading,
                             endPoint: .bottomTrailing
                         ))
-                        .frame(width: 34, height: 34)
-                        .shadow(color: Color(hex: "6366f1").opacity(0.4), radius: 6, x: 0, y: 2)
+                        .frame(width: 36, height: 36)
+                        .shadow(color: Color(hex: "6366f1").opacity(0.45), radius: 8, x: 0, y: 3)
                     
                     Image(systemName: "mic.fill")
-                        .font(.system(size: 16, weight: .bold))
+                        .font(.system(size: 17, weight: .bold))
                         .foregroundColor(.white)
                 }
                 
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("iPhoneMic ASIO")
-                        .font(.system(size: 17, weight: .bold, design: .rounded))
-                        .foregroundColor(.white)
+                    HStack(spacing: 6) {
+                        Text("iPhoneMic")
+                            .font(.system(size: 18, weight: .bold, design: .rounded))
+                            .foregroundColor(.white)
+                        
+                        Text("ASIO PRO")
+                            .font(.system(size: 9, weight: .black, design: .monospaced))
+                            .foregroundColor(Color(hex: "38bdf8"))
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1.5)
+                            .background(Capsule().fill(Color(hex: "0284c7").opacity(0.3)))
+                    }
                     
-                    Text("48kHz • 16-bit • 低延迟输入")
+                    Text("CoreAudio RemoteIO • 48kHz • 16-bit")
                         .font(.system(size: 10, weight: .medium))
-                        .foregroundColor(Color.white.opacity(0.5))
+                        .foregroundColor(Color.white.opacity(0.55))
                 }
             }
             
@@ -166,16 +184,22 @@ struct ContentView: View {
             
             // Action Icon Buttons
             HStack(spacing: 12) {
-                Button(action: { showingHelpSheet = true }) {
+                Button(action: {
+                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                    showingHelpSheet = true
+                }) {
                     Image(systemName: "questionmark.circle.fill")
-                        .font(.system(size: 20))
-                        .foregroundColor(Color.white.opacity(0.65))
+                        .font(.system(size: 21))
+                        .foregroundColor(Color.white.opacity(0.7))
                 }
                 
-                Button(action: { showingSettingsSheet = true }) {
+                Button(action: {
+                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                    showingSettingsSheet = true
+                }) {
                     Image(systemName: "slider.horizontal.3")
-                        .font(.system(size: 20))
-                        .foregroundColor(Color.white.opacity(0.65))
+                        .font(.system(size: 21))
+                        .foregroundColor(Color.white.opacity(0.7))
                 }
             }
         }
@@ -222,7 +246,7 @@ struct ContentView: View {
                         
                         Text(statusSubheadline)
                             .font(.system(size: 12, weight: .medium))
-                            .foregroundColor(Color.white.opacity(0.6))
+                            .foregroundColor(Color.white.opacity(0.65))
                     }
                     
                     Spacer()
@@ -241,7 +265,7 @@ struct ContentView: View {
                     } else {
                         Image(systemName: "cable.connector")
                             .font(.system(size: 22))
-                            .foregroundColor(statusColor.opacity(0.8))
+                            .foregroundColor(statusColor.opacity(0.85))
                     }
                 }
                 
@@ -253,7 +277,7 @@ struct ContentView: View {
                     
                     Text("输入源: \(viewModel.inputDeviceName)")
                         .font(.system(size: 11, weight: .medium))
-                        .foregroundColor(Color.white.opacity(0.75))
+                        .foregroundColor(Color.white.opacity(0.8))
                     
                     Spacer()
                     
@@ -266,7 +290,7 @@ struct ContentView: View {
                 }
                 .padding(.horizontal, 12)
                 .padding(.vertical, 8)
-                .background(RoundedRectangle(cornerRadius: 10).fill(Color.white.opacity(0.03)))
+                .background(RoundedRectangle(cornerRadius: 10).fill(Color.white.opacity(0.04)))
             }
         }
     }
@@ -343,11 +367,11 @@ struct ContentView: View {
                     }
                 }
                 
-                // Studio Segmented Bars
+                // Studio Segmented Bars with Peak Hold Indicators
                 VStack(spacing: 10) {
-                    vuSegmentedBar(title: "LEFT  / 主轨", level: viewModel.peakLevel, isLeft: true)
+                    vuSegmentedBar(title: "CH 1 / 左声道 (L)", level: viewModel.peakLevel, peakHold: peakHoldLeft)
                     if config.channelMode == .stereo {
-                        vuSegmentedBar(title: "RIGHT / 副轨", level: viewModel.peakLevel * 0.98, isLeft: false)
+                        vuSegmentedBar(title: "CH 2 / 右声道 (R)", level: viewModel.peakLevel * 0.98, peakHold: peakHoldRight)
                     }
                 }
                 
@@ -368,12 +392,12 @@ struct ContentView: View {
         }
     }
     
-    private func vuSegmentedBar(title: String, level: Float, isLeft: Bool) -> some View {
+    private func vuSegmentedBar(title: String, level: Float, peakHold: Float) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack {
                 Text(title)
                     .font(.system(size: 10, weight: .bold, design: .monospaced))
-                    .foregroundColor(Color.white.opacity(0.5))
+                    .foregroundColor(Color.white.opacity(0.55))
                 Spacer()
             }
             
@@ -382,8 +406,11 @@ struct ContentView: View {
                 let normalized = CGFloat(max(0.0, min(1.0, (level + 60.0) / 60.0)))
                 let barWidth = width * normalized
                 
+                let holdNormalized = CGFloat(max(0.0, min(1.0, (peakHold + 60.0) / 60.0)))
+                let holdOffset = max(0, min(width - 3, width * holdNormalized))
+                
                 ZStack(alignment: .leading) {
-                    // Track background with segment notches
+                    // Track background
                     RoundedRectangle(cornerRadius: 6)
                         .fill(Color.white.opacity(0.04))
                     
@@ -392,19 +419,51 @@ struct ContentView: View {
                         .fill(LinearGradient(
                             stops: [
                                 .init(color: Color(hex: "10b981"), location: 0.0),   // Green (-60 to -18)
-                                .init(color: Color(hex: "3b82f6"), location: 0.5),   // Cyan/Blue
-                                .init(color: Color(hex: "eab308"), location: 0.8),   // Amber (-6 to -1)
-                                .init(color: Color(hex: "ef4444"), location: 1.0)    // Clip Peak
+                                .init(color: Color(hex: "3b82f6"), location: 0.55),  // Cyan/Blue
+                                .init(color: Color(hex: "eab308"), location: 0.82),  // Amber (-6 to -1)
+                                .init(color: Color(hex: "ef4444"), location: 1.0)    // Red Peak
                             ],
                             startPoint: .leading,
                             endPoint: .trailing
                         ))
                         .frame(width: barWidth)
-                        .animation(.linear(duration: 0.04), value: level)
-                        .shadow(color: dbColor(for: level).opacity(0.4), radius: 4, x: 0, y: 0)
+                        .animation(.linear(duration: 0.03), value: level)
+                        .shadow(color: dbColor(for: level).opacity(0.35), radius: 4, x: 0, y: 0)
+                    
+                    // Studio Peak Hold Floating Notch
+                    if peakHold > -58.0 {
+                        Rectangle()
+                            .fill(dbColor(for: peakHold))
+                            .frame(width: 2.5, height: 14)
+                            .offset(x: holdOffset)
+                            .shadow(color: dbColor(for: peakHold), radius: 3)
+                    }
                 }
             }
             .frame(height: 14)
+        }
+    }
+    
+    private func updatePeakHold(newPeak: Float) {
+        if newPeak > peakHoldLeft {
+            peakHoldLeft = newPeak
+            peakHoldTimerLeft?.invalidate()
+            peakHoldTimerLeft = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: false) { _ in
+                withAnimation(.easeOut(duration: 0.3)) {
+                    peakHoldLeft = viewModel.peakLevel
+                }
+            }
+        }
+        
+        let rightVal = newPeak * 0.98
+        if rightVal > peakHoldRight {
+            peakHoldRight = rightVal
+            peakHoldTimerRight?.invalidate()
+            peakHoldTimerRight = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: false) { _ in
+                withAnimation(.easeOut(duration: 0.3)) {
+                    peakHoldRight = viewModel.peakLevel * 0.98
+                }
+            }
         }
     }
     
@@ -424,25 +483,24 @@ struct ContentView: View {
                     Image(systemName: "tuningfork")
                         .font(.system(size: 12))
                         .foregroundColor(Color(hex: "818cf8"))
-                    Text("音频参数设置")
+                    Text("硬件采集参数")
                         .font(.system(size: 13, weight: .semibold))
                         .foregroundColor(.white)
                     Spacer()
-                    Text("ASIO 同步模式")
-                        .font(.system(size: 10))
-                        .foregroundColor(Color.white.opacity(0.4))
+                    Text("CoreAudio 直通")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundColor(Color(hex: "10b981"))
                 }
                 
-                // Buffer Size Selector
+                // Buffer Size Selector with Mode Tag
                 VStack(alignment: .leading, spacing: 6) {
                     HStack {
-                        Text("缓冲区大小 (Buffer Size)")
+                        Text("缓冲区 (Buffer Size)")
                             .font(.system(size: 11, weight: .medium))
                             .foregroundColor(Color.white.opacity(0.6))
                         Spacer()
-                        Text("延迟: \(String(format: "%.2fms", config.bufferLatencyMs))")
-                            .font(.system(size: 11, weight: .bold, design: .monospaced))
-                            .foregroundColor(Color(hex: "38bdf8"))
+                        
+                        latencyTagBadge(for: config.bufferSize)
                     }
                     
                     Picker("Buffer", selection: $config.bufferSize) {
@@ -451,6 +509,9 @@ struct ContentView: View {
                         }
                     }
                     .pickerStyle(.segmented)
+                    .onChange(of: config.bufferSize) { _ in
+                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                    }
                 }
                 
                 // Channel Mode
@@ -465,8 +526,30 @@ struct ContentView: View {
                         }
                     }
                     .pickerStyle(.segmented)
+                    .onChange(of: config.channelMode) { _ in
+                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                    }
                 }
             }
+        }
+    }
+    
+    private func latencyTagBadge(for size: SupportedBufferSize) -> some View {
+        let (title, color) = latencyInfo(for: size)
+        return Text(title)
+            .font(.system(size: 10, weight: .bold, design: .monospaced))
+            .foregroundColor(color)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(Capsule().fill(color.opacity(0.18)))
+    }
+    
+    private func latencyInfo(for size: SupportedBufferSize) -> (String, Color) {
+        switch size {
+        case .size64:  return ("极速 1.33ms", Color(hex: "10b981"))
+        case .size128: return ("超低 2.67ms", Color(hex: "38bdf8"))
+        case .size256: return ("专业 5.33ms", Color(hex: "818cf8"))
+        case .size512: return ("稳定 10.67ms", Color(hex: "f59e0b"))
         }
     }
     
@@ -485,7 +568,7 @@ struct ContentView: View {
                             .foregroundColor(.white)
                     }
                     Spacer()
-                    Text("ASRC 时钟同步中")
+                    Text("ASRC 漂移同步中")
                         .font(.system(size: 10, weight: .medium))
                         .foregroundColor(Color(hex: "10b981"))
                 }
@@ -493,7 +576,7 @@ struct ContentView: View {
                 LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
                     telemetryMetric(title: "发送数据", value: formatBytes(viewModel.bytesSent))
                     telemetryMetric(title: "丢包数量", value: "\(viewModel.packetsDropped)")
-                    telemetryMetric(title: "硬件延迟", value: String(format: "%.1fms", config.bufferLatencyMs))
+                    telemetryMetric(title: "硬件延迟", value: String(format: "%.2fms", config.bufferLatencyMs))
                     telemetryMetric(title: "采样格式", value: "48k/16b")
                 }
             }
@@ -520,7 +603,7 @@ struct ContentView: View {
     
     private var masterActionButton: some View {
         Button(action: {
-            let impact = UIImpactFeedbackGenerator(style: .medium)
+            let impact = UIImpactFeedbackGenerator(style: .rigid)
             impact.impactOccurred()
             
             withAnimation(.spring(response: 0.35, dampingFraction: 0.7)) {
@@ -600,7 +683,7 @@ struct ContentView: View {
                 .foregroundColor(Color(hex: "10b981"))
             Text("内置 usbmuxd 硬件隧道 • 零拷贝无锁驱动 • 自动伴奏对齐")
                 .font(.system(size: 10, weight: .medium))
-                .foregroundColor(Color.white.opacity(0.4))
+                .foregroundColor(Color.white.opacity(0.45))
         }
     }
     
@@ -683,11 +766,22 @@ struct StudioSettingsSheet: View {
                     VStack(spacing: 20) {
                         StudioCard {
                             VStack(alignment: .leading, spacing: 16) {
-                                Text("专业音频参数")
+                                Text("专业音频架构")
                                     .font(.system(size: 14, weight: .bold))
                                     .foregroundColor(.white)
                                 
-                                VStack(alignment: .leading, spacing: 8) {
+                                VStack(alignment: .leading, spacing: 6) {
+                                    Text("采集引擎 (Capture Engine)")
+                                        .font(.system(size: 12))
+                                        .foregroundColor(.gray)
+                                    Text("CoreAudio RemoteIO (硬件 ADC 直通)")
+                                        .font(.system(size: 14, weight: .semibold, design: .monospaced))
+                                        .foregroundColor(Color(hex: "10b981"))
+                                }
+                                
+                                Divider().background(Color.white.opacity(0.1))
+                                
+                                VStack(alignment: .leading, spacing: 6) {
                                     Text("采样率 (Sample Rate)")
                                         .font(.system(size: 12))
                                         .foregroundColor(.gray)
@@ -698,8 +792,8 @@ struct StudioSettingsSheet: View {
                                 
                                 Divider().background(Color.white.opacity(0.1))
                                 
-                                VStack(alignment: .leading, spacing: 8) {
-                                    Text("比特率 (Bit Depth)")
+                                VStack(alignment: .leading, spacing: 6) {
+                                    Text("位深 (Bit Depth)")
                                         .font(.system(size: 12))
                                         .foregroundColor(.gray)
                                     Text("16-bit PCM (未压缩无损传输)")
@@ -709,11 +803,11 @@ struct StudioSettingsSheet: View {
                                 
                                 Divider().background(Color.white.opacity(0.1))
                                 
-                                VStack(alignment: .leading, spacing: 8) {
+                                VStack(alignment: .leading, spacing: 6) {
                                     Text("ASRC 硬件时钟漂移补偿")
                                         .font(.system(size: 12))
                                         .foregroundColor(.gray)
-                                    Text("已开启 (±20 ppm 动态自适应)")
+                                    Text("已开启 (±500 ppm 动态自适应重采样)")
                                         .font(.system(size: 13, weight: .semibold))
                                         .foregroundColor(Color(hex: "10b981"))
                                 }
@@ -776,7 +870,7 @@ struct DAWGuideSheet: View {
                         guideStepCard(
                             step: "3",
                             title: "DAW 音频设置",
-                            desc: "在 Studio One / Cubase / Ableton 的音频设备中选择「iPhone USB Microphone ASIO」，新建轨道即可录音。"
+                            desc: "在 Studio One / Cubase / Reaper / Ableton 的音频设备中选择「iPhone USB Microphone ASIO」，新建轨道即可录音。"
                         )
                         
                         guideStepCard(
