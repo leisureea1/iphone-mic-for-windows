@@ -10,7 +10,7 @@ import AVFoundation
 import Accelerate
 
 /// Callback type for delivering captured PCM audio data and levels (peak, rms in dBFS)
-typealias AudioDataCallback = (Data, Float, Float) -> Void
+typealias AudioDataCallback = @Sendable (Data, Float, Float) -> Void
 
 /// Errors that can occur during audio capture
 enum AudioCaptureError: Error, LocalizedError {
@@ -57,6 +57,7 @@ private func remoteIORenderCallback(
     )
 }
 
+@MainActor
 final class AudioCaptureEngine: ObservableObject {
     
     // MARK: - Published State
@@ -67,16 +68,19 @@ final class AudioCaptureEngine: ObservableObject {
     @Published var errorMessage: String?
     @Published var inputDeviceName: String = "iPhone Microphone"
     
-    // MARK: - Configuration
+    // MARK: - Captured Configuration Snapshot (Immutable & Thread-safe)
     
-    private let config: AudioConfig
-    private var audioUnit: AudioUnit?
-    private var dataCallback: AudioDataCallback?
+    nonisolated private let sampleRate: Double
+    nonisolated private let channelCount: UInt32
+    nonisolated private let bufferDuration: Double
     
-    // Pre-allocated AudioBufferList for rendering (zero memory allocation on real-time thread)
-    private var bufferList: UnsafeMutablePointer<AudioBufferList>?
-    private var rawPcmBuffer: UnsafeMutablePointer<Int16>?
-    private let maxFrames: UInt32 = 4096
+    nonisolated private let maxFrames: UInt32 = 4096
+    
+    // CoreAudio Handles & Buffers
+    nonisolated(unsafe) private var audioUnit: AudioUnit?
+    nonisolated(unsafe) private var dataCallback: AudioDataCallback?
+    nonisolated(unsafe) private var bufferList: UnsafeMutablePointer<AudioBufferList>?
+    nonisolated(unsafe) private var rawPcmBuffer: UnsafeMutablePointer<Int16>?
     
     // Level meter smoothing
     private var smoothedPeak: Float = -160.0
@@ -86,39 +90,36 @@ final class AudioCaptureEngine: ObservableObject {
     // MARK: - Init
     
     init(config: AudioConfig) {
-        self.config = config
+        self.sampleRate = Double(config.sampleRate.rawValue)
+        self.channelCount = UInt32(config.channelMode.rawValue)
+        self.bufferDuration = Double(config.bufferSize.rawValue) / Double(config.sampleRate.rawValue)
         allocateBuffers()
     }
     
     deinit {
-        stop()
-        deallocateBuffers()
-    }
-    
-    private func allocateBuffers() {
-        let channelCount = UInt32(config.channelMode.rawValue)
-        let byteSize = maxFrames * channelCount * 2
-        rawPcmBuffer = UnsafeMutablePointer<Int16>.allocate(capacity: Int(maxFrames * channelCount))
-        
-        let ablSize = MemoryLayout<AudioBufferList>.size + MemoryLayout<AudioBuffer>.size
-        let ptr = UnsafeMutableRawPointer.allocate(byteCount: ablSize, alignment: MemoryLayout<AudioBufferList>.alignment)
-        bufferList = ptr.bindMemory(to: AudioBufferList.self, capacity: 1)
-        
-        bufferList?.pointee.mNumberBuffers = 1
-        bufferList?.pointee.mBuffers.mNumberChannels = channelCount
-        bufferList?.pointee.mBuffers.mDataByteSize = byteSize
-        bufferList?.pointee.mBuffers.mData = UnsafeMutableRawPointer(rawPcmBuffer)
-    }
-    
-    private func deallocateBuffers() {
         if let raw = rawPcmBuffer {
             raw.deallocate()
-            rawPcmBuffer = nil
         }
         if let abl = bufferList {
             abl.deallocate()
-            bufferList = nil
         }
+    }
+    
+    nonisolated private func allocateBuffers() {
+        let byteSize = maxFrames * channelCount * 2
+        let rawBuffer = UnsafeMutablePointer<Int16>.allocate(capacity: Int(maxFrames * channelCount))
+        rawPcmBuffer = rawBuffer
+        
+        let ablSize = MemoryLayout<AudioBufferList>.size + MemoryLayout<AudioBuffer>.size
+        let ptr = UnsafeMutableRawPointer.allocate(byteCount: ablSize, alignment: MemoryLayout<AudioBufferList>.alignment)
+        let abl = ptr.bindMemory(to: AudioBufferList.self, capacity: 1)
+        
+        abl.pointee.mNumberBuffers = 1
+        abl.pointee.mBuffers.mNumberChannels = channelCount
+        abl.pointee.mBuffers.mDataByteSize = byteSize
+        abl.pointee.mBuffers.mData = UnsafeMutableRawPointer(rawBuffer)
+        
+        bufferList = abl
     }
     
     // MARK: - Public API
@@ -162,10 +163,8 @@ final class AudioCaptureEngine: ObservableObject {
             throw AudioCaptureError.audioUnitStartFailed(status)
         }
         
-        DispatchQueue.main.async {
-            self.isRunning = true
-            self.errorMessage = nil
-        }
+        self.isRunning = true
+        self.errorMessage = nil
         
         print("[AudioCapture] CoreAudio RemoteIO started successfully")
     }
@@ -181,11 +180,9 @@ final class AudioCaptureEngine: ObservableObject {
             audioUnit = nil
         }
         
-        DispatchQueue.main.async {
-            self.isRunning = false
-            self.peakLevel = -160.0
-            self.rmsLevel = -160.0
-        }
+        self.isRunning = false
+        self.peakLevel = -160.0
+        self.rmsLevel = -160.0
         
         print("[AudioCapture] CoreAudio RemoteIO stopped")
     }
@@ -196,17 +193,12 @@ final class AudioCaptureEngine: ObservableObject {
         let session = AVAudioSession.sharedInstance()
         do {
             try session.setCategory(.playAndRecord, mode: .measurement, options: [.defaultToSpeaker, .allowBluetooth])
-            try session.setPreferredSampleRate(Double(config.sampleRate.rawValue))
-            
-            // Set hardware IO buffer duration to selected buffer size (e.g. 128 samples = 2.67ms, 256 samples = 5.33ms)
-            let bufferDuration = Double(config.bufferSize.rawValue) / Double(config.sampleRate.rawValue)
+            try session.setPreferredSampleRate(sampleRate)
             try session.setPreferredIOBufferDuration(bufferDuration)
             try session.setActive(true)
             
             let portName = session.currentRoute.inputs.first?.portName ?? "iPhone Microphone"
-            DispatchQueue.main.async {
-                self.inputDeviceName = portName
-            }
+            self.inputDeviceName = portName
             
             print("[AudioCapture] Session active: SR=\(session.sampleRate)Hz, HW Buffer=\(session.ioBufferDuration * 1000)ms")
         } catch {
@@ -258,9 +250,8 @@ final class AudioCaptureEngine: ObservableObject {
         guard status == noErr else { throw AudioCaptureError.audioUnitInitFailed(status) }
         
         // 3. Configure AudioStreamBasicDescription: 16-bit Linear PCM, Little-Endian, Packed
-        let channelCount = UInt32(config.channelMode.rawValue)
         var asbd = AudioStreamBasicDescription(
-            mSampleRate: Double(config.sampleRate.rawValue),
+            mSampleRate: sampleRate,
             mFormatID: kAudioFormatLinearPCM,
             mFormatFlags: kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked,
             mBytesPerPacket: 2 * channelCount,
@@ -303,7 +294,7 @@ final class AudioCaptureEngine: ObservableObject {
         self.audioUnit = au
     }
     
-    fileprivate func processAudioInput(
+    nonisolated fileprivate func processAudioInput(
         ioActionFlags: UnsafeMutablePointer<AudioUnitRenderActionFlags>,
         inTimeStamp: UnsafePointer<AudioTimeStamp>,
         inBusNumber: UInt32,
@@ -311,7 +302,6 @@ final class AudioCaptureEngine: ObservableObject {
     ) -> OSStatus {
         guard let au = audioUnit, let abl = bufferList else { return noErr }
         
-        let channelCount = UInt32(config.channelMode.rawValue)
         let byteSize = inNumberFrames * channelCount * 2
         abl.pointee.mBuffers.mDataByteSize = byteSize
         

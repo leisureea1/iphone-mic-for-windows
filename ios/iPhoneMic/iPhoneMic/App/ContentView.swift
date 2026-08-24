@@ -448,9 +448,12 @@ struct ContentView: View {
         if newPeak > peakHoldLeft {
             peakHoldLeft = newPeak
             peakHoldTimerLeft?.invalidate()
+            let decayTarget = viewModel.peakLevel
             peakHoldTimerLeft = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: false) { _ in
-                withAnimation(.easeOut(duration: 0.3)) {
-                    peakHoldLeft = viewModel.peakLevel
+                Task { @MainActor in
+                    withAnimation(.easeOut(duration: 0.3)) {
+                        self.peakHoldLeft = decayTarget
+                    }
                 }
             }
         }
@@ -459,9 +462,12 @@ struct ContentView: View {
         if rightVal > peakHoldRight {
             peakHoldRight = rightVal
             peakHoldTimerRight?.invalidate()
+            let decayTarget = viewModel.peakLevel * 0.98
             peakHoldTimerRight = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: false) { _ in
-                withAnimation(.easeOut(duration: 0.3)) {
-                    peakHoldRight = viewModel.peakLevel * 0.98
+                Task { @MainActor in
+                    withAnimation(.easeOut(duration: 0.3)) {
+                        self.peakHoldRight = decayTarget
+                    }
                 }
             }
         }

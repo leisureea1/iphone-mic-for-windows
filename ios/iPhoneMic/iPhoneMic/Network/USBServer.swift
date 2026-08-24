@@ -221,12 +221,11 @@ final class USBServer: ObservableObject {
     // MARK: - Private: Data Sending
     
     private func enqueueAndSend(_ data: Data) {
+        guard !self.activeConnections.isEmpty else { return }
+        let connections = self.activeConnections
         networkQueue.async { [weak self] in
-            guard let self = self else { return }
-            guard !self.activeConnections.isEmpty else { return }
-            
             // Send directly to all connections on dedicated network queue for minimum latency.
-            for connection in self.activeConnections {
+            for connection in connections {
                 connection.send(content: data, completion: .contentProcessed { error in
                     if let error = error {
                         print("[USBServer] Send error: \(error)")
