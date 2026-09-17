@@ -112,7 +112,7 @@ bool PacketParser::try_parse(ParsedPacket& out) {
     }
     
     // Sanity check payload size (max 1MB to prevent memory issues)
-    if (header.payload_size > 1024 * 1024) {
+    if (header.payload_size > MAX_PAYLOAD_SIZE) {
         buffer_.erase(buffer_.begin());
         return false;
     }

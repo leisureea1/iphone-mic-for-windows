@@ -19,6 +19,7 @@ namespace iphone_mic {
 constexpr uint32_t PROTOCOL_MAGIC   = 0x4D485049;  // "IPHM" little-endian
 constexpr uint16_t PROTOCOL_VERSION = 1;
 constexpr uint16_t DEFAULT_PORT     = 8730;
+constexpr uint32_t MAX_PAYLOAD_SIZE = 1024 * 1024;
 
 // Packet types
 enum class PacketType : uint16_t {
