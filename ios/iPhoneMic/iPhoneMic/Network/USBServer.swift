@@ -27,6 +27,7 @@ final class USBServer: ObservableObject {
     private var activeConnections: [NWConnection] = []
     private let connectionLock = NSLock()
     private var heartbeatTimer: DispatchSourceTimer?
+    private var receiveBuffer = Data()
     
     // Queue for network listener operations
     private let networkQueue = DispatchQueue(
@@ -262,19 +263,6 @@ final class USBServer: ObservableObject {
         }
     }
     
-    private func handleReceivedData(_ data: Data) {
-        guard let header = PacketHeader.deserialize(from: data) else { return }
-        
-        switch header.type {
-        case .configAck:
-            print("[USBServer] Config acknowledged by client")
-        case .config:
-            print("[USBServer] Received config request from client")
-        default:
-            break
-        }
-    }
-    
     // MARK: - Private: Heartbeat
     
     private func startHeartbeat() {
@@ -302,5 +290,34 @@ final class USBServer: ObservableObject {
     private func stopHeartbeat() {
         heartbeatTimer?.cancel()
         heartbeatTimer = nil
+        receiveBuffer.removeAll(keepingCapacity: false)
+    }
+
+    private func handleReceivedData(_ data: Data) {
+        receiveBuffer.append(data)
+
+        while true {
+            guard receiveBuffer.count >= PacketHeader.size else { return }
+
+            guard let header = PacketHeader.deserialize(from: receiveBuffer) else {
+                receiveBuffer.removeFirst()
+                continue
+            }
+
+            let payloadSize = Int(header.payloadSize)
+            let packetSize = PacketHeader.size + payloadSize
+            guard receiveBuffer.count >= packetSize else { return }
+
+            switch header.type {
+            case .configAck:
+                print("[USBServer] Config acknowledged by client")
+            case .config:
+                print("[USBServer] Received config request from client")
+            default:
+                break
+            }
+
+            receiveBuffer.removeFirst(packetSize)
+        }
     }
 }

@@ -58,7 +58,7 @@ HRESULT STDMETHODCALLTYPE iPhoneAsioDriver::QueryInterface(REFIID riid, void** p
     if (!ppv) return E_POINTER;
     *ppv = nullptr;
     
-    if (IsEqualIID(riid, IID_IUnknown) || IsEqualIID(riid, CLSID_iPhoneAsioDriver)) {
+    if (IsEqualIID(riid, IID_IUnknown) || IsEqualIID(riid, IID_IASIO)) {
         *ppv = static_cast<IASIO*>(this);
         AddRef();
         return S_OK;
@@ -697,7 +697,7 @@ void iPhoneAsioDriver::usb_client_thread_func() {
                 break;
             }
             
-            if (header.magic != PROTOCOL_MAGIC) {
+            if (!header.is_valid() || header.payload_size > MAX_PAYLOAD_SIZE) {
                 // Out of sync - break to reconnect
                 break;
             }

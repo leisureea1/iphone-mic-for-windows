@@ -20,6 +20,9 @@ let kDefaultPort: UInt16 = 8730
 /// Heartbeat interval in seconds
 let kHeartbeatInterval: TimeInterval = 1.0
 
+/// Maximum payload size to protect against malformed/hostile packets (1MB)
+let kMaxPayloadSize: UInt32 = 1024 * 1024
+
 // MARK: - Packet Types
 
 enum PacketType: UInt16 {
@@ -91,32 +94,38 @@ struct PacketHeader {
     /// Deserialize header from raw bytes
     static func deserialize(from data: Data) -> PacketHeader? {
         guard data.count >= PacketHeader.size else { return nil }
-        
-        let magic = data.withUnsafeBytes { ptr -> UInt32 in
-            ptr.load(fromByteOffset: 0, as: UInt32.self).littleEndian
-        }
+
+        let magic = UInt32(data[0])
+            | (UInt32(data[1]) << 8)
+            | (UInt32(data[2]) << 16)
+            | (UInt32(data[3]) << 24)
         guard magic == kProtocolMagic else { return nil }
-        
-        let version = data.withUnsafeBytes { ptr -> UInt16 in
-            ptr.load(fromByteOffset: 4, as: UInt16.self).littleEndian
-        }
-        
-        let typeRaw = data.withUnsafeBytes { ptr -> UInt16 in
-            ptr.load(fromByteOffset: 6, as: UInt16.self).littleEndian
-        }
+
+        let version = UInt16(data[4]) | (UInt16(data[5]) << 8)
+        guard version == kProtocolVersion else { return nil }
+
+        let typeRaw = UInt16(data[6]) | (UInt16(data[7]) << 8)
         guard let type = PacketType(rawValue: typeRaw) else { return nil }
-        
-        let payloadSize = data.withUnsafeBytes { ptr -> UInt32 in
-            ptr.load(fromByteOffset: 8, as: UInt32.self).littleEndian
-        }
-        
-        let reserved = data.withUnsafeBytes { ptr -> UInt32 in
-            ptr.load(fromByteOffset: 12, as: UInt32.self).littleEndian
-        }
-        
-        let timestamp = data.withUnsafeBytes { ptr -> UInt64 in
-            ptr.load(fromByteOffset: 16, as: UInt64.self).littleEndian
-        }
+
+        let payloadSize = UInt32(data[8])
+            | (UInt32(data[9]) << 8)
+            | (UInt32(data[10]) << 16)
+            | (UInt32(data[11]) << 24)
+        guard payloadSize <= kMaxPayloadSize else { return nil }
+
+        let reserved = UInt32(data[12])
+            | (UInt32(data[13]) << 8)
+            | (UInt32(data[14]) << 16)
+            | (UInt32(data[15]) << 24)
+
+        let timestamp = UInt64(data[16])
+            | (UInt64(data[17]) << 8)
+            | (UInt64(data[18]) << 16)
+            | (UInt64(data[19]) << 24)
+            | (UInt64(data[20]) << 32)
+            | (UInt64(data[21]) << 40)
+            | (UInt64(data[22]) << 48)
+            | (UInt64(data[23]) << 56)
         
         return PacketHeader(
             magic: magic,

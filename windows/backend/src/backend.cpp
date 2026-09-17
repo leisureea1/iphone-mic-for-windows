@@ -200,7 +200,12 @@ void BackgroundUSBThread() {
                 break;
             }
 
-            if (header.magic == PROTOCOL_MAGIC && header.type == static_cast<uint16_t>(PacketType::AudioData)) {
+            if (!header.is_valid() || header.payload_size > MAX_PAYLOAD_SIZE) {
+                g_IsConnected = false;
+                break;
+            }
+
+            if (header.type == static_cast<uint16_t>(PacketType::AudioData)) {
                 if (payload_buf.size() < header.payload_size) {
                     payload_buf.resize(header.payload_size);
                 }
@@ -238,7 +243,7 @@ void BackgroundUSBThread() {
                     }
                 }
                 
-            } else if (header.magic == PROTOCOL_MAGIC && header.type == static_cast<uint16_t>(PacketType::Config)) {
+            } else if (header.type == static_cast<uint16_t>(PacketType::Config)) {
                 if (payload_buf.size() < header.payload_size) {
                     payload_buf.resize(header.payload_size);
                 }
@@ -447,4 +452,3 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD  ul_reason_for_call, LPVOID lpReser
     }
     return TRUE;
 }
-
